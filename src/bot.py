@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 
+from composio import Composio
 from dotenv import load_dotenv
 from telegram import MessageEntity, Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
@@ -54,10 +55,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 def main() -> None:
     load_dotenv()
 
+    session = Composio().create(user_id=os.environ["COMPOSIO_USER_ID"])
+    mcp_servers = {
+        "composio": {
+            "type": session.mcp.type,
+            "url": session.mcp.url,
+            "headers": session.mcp.headers,
+        }
+    }
+
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.bot_data["cfg"] = {
-        "mcp_url": os.environ["COMPOSIO_MCP_URL"],
-        "mcp_api_key": os.environ["COMPOSIO_API_KEY"],
+        "mcp_servers": mcp_servers,
         "model": os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6[1m]"),
         "max_turns": int(os.environ.get("MAX_AGENT_TURNS", "12")),
     }

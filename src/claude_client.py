@@ -1,8 +1,8 @@
 """Claude Agent SDK wrapper.
 
-Passes a per-chat group-chat transcript to Claude via `query()`, with one
-Composio HTTP MCP server attached (X-API-Key header). The SDK handles the
-tool-call loop and returns a final text via ResultMessage.
+Passes a per-chat group-chat transcript to Claude via `query()`, with a
+caller-supplied `mcp_servers` dict attached. The SDK handles the tool-call
+loop and returns a final text via ResultMessage.
 """
 
 from __future__ import annotations
@@ -23,8 +23,7 @@ SYSTEM_PROMPT = (
 async def respond(
     messages: list[dict],
     *,
-    mcp_url: str,
-    mcp_api_key: str,
+    mcp_servers: dict,
     model: str,
     max_turns: int = 12,
 ) -> str:
@@ -35,13 +34,7 @@ async def respond(
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
         model=model,
-        mcp_servers={
-            "composio": {
-                "type": "http",
-                "url": mcp_url,
-                "headers": {"x-api-key": mcp_api_key},
-            }
-        },
+        mcp_servers=mcp_servers,
         allowed_tools=["mcp__composio__*"],
         permission_mode="bypassPermissions",
         setting_sources=[],

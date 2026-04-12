@@ -14,8 +14,8 @@ Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent S
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | from @BotFather |
 | `ANTHROPIC_API_KEY` | yes | consumed by the Claude Code CLI under the hood |
-| `COMPOSIO_API_KEY` | yes | sent as `X-API-Key` to the Composio MCP URL |
-| `COMPOSIO_MCP_URL` | yes | from `composio.mcp.create(...)` — create one server covering the toolkits you want (e.g. Notion, Google Maps) |
+| `COMPOSIO_API_KEY` | yes | read by the `composio` SDK at startup |
+| `COMPOSIO_USER_ID` | yes | your Composio user id (e.g. `user_7svs9s`) — the bot creates a Tool Router session for this user at startup, which exposes all your connected toolkits |
 | `ANTHROPIC_MODEL` | no | default `claude-opus-4-6[1m]` |
 | `HISTORY_DB_PATH` | no | default `./history.sqlite`; in Docker/Fly, `/data/history.sqlite` |
 | `MAX_AGENT_TURNS` | no | default `12` |
