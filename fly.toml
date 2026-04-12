@@ -7,7 +7,16 @@ primary_region = "iad"
 [env]
   HISTORY_DB_PATH = "/data/history.sqlite"
   ANTHROPIC_MODEL = "claude-opus-4-6[1m]"
-  MAX_AGENT_TURNS = "12"
+  MAX_AGENT_TURNS = "40"
+  # Enables Claude Code's built-in stream watchdog that kills stuck tool
+  # calls — workaround for the indefinite WebFetch hang bug. See
+  # https://github.com/anthropics/claude-code/issues/34565
+  CLAUDE_ENABLE_STREAM_WATCHDOG = "1"
+  # Keep MCP tool results (e.g. Composio schemas) inline up to ~50k tokens
+  # instead of offloading to disk, which forces Claude to go on filesystem
+  # expeditions with Read/Grep. 50k is ~5% of the 1M Opus context.
+  MAX_MCP_OUTPUT_TOKENS = "25000"
+  MEMORY_PATH = "/data/memory.md"
 
 [[mounts]]
   source = "bot_data"
