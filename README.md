@@ -2,6 +2,12 @@
 
 Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent SDK, with Notion + Google Maps (and everything else) via a Composio MCP server.
 
+## Roadmap
+
+- [ ] **Composio triggers for reactive behaviour.** Run a small aiohttp server alongside long-polling, expose a public webhook on Fly, and let Composio POST incoming events (new Gmail, calendar invites, etc.) so the bot can act on them without being mentioned. Needs signature verification, a configurable default reply chat, and some debounce to avoid runaway cost on email-heavy periods.
+- [ ] **Approval flow for irreversible actions.** Right now `can_use_tool` auto-approves everything. Before sending email, creating/modifying calendar events, or editing Notion pages, the bot should post a compact preview to the chat and wait for a ✅ reaction (or `/approve`) before executing. Denials should propagate back to Claude as a tool result.
+- [ ] **Multi-account Composio support.** Today each familiar gets one `COMPOSIO_USER_ID` and all tool calls act as that identity. Need to let a single agent hold multiple connected accounts simultaneously — e.g. Iris sends email from her own Gmail but reads from my personal inbox, or reads Damon's and the flatmate's calendars to find joint viewing slots. Probably a map of role → user_id and a way for Claude to pick the right identity per tool call.
+
 ## Architecture
 
 - **bot.py** — python-telegram-bot long-polling, listens in groups, filters to messages that @mention or reply to the bot. Persists every group message to SQLite.
