@@ -104,6 +104,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 return
 
     await set_reaction(REACTION_RECEIVED)
+    last_streamed_text = {"value": None}
+
+    async def send_to_main(text: str) -> None:
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=telegramify_markdown.markdownify(text)[:4000],
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        except Exception:
+            log.exception("failed to send main-chat message")
 
     async def on_tool_use(tool_name: str, tool_input: dict) -> None:
         await set_reaction(REACTION_WORKING)
@@ -112,8 +123,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await send_debug(f"🔧 {pretty}{f': {arg}' if arg else ''}"[:500])
 
     async def on_text(text: str) -> None:
-        if text.strip():
-            await send_debug(f"💭 {text}")
+        if not text.strip():
+            return
+        last_streamed_text["value"] = text
+        await send_debug(f"💭 {text}")
+        await send_to_main(text)
 
     async def on_thinking(text: str) -> None:
         await set_reaction(REACTION_THINKING)
@@ -149,10 +163,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     history.add_assistant(chat.id, reply)
     await set_reaction(REACTION_ERROR if error else None)
     await send_debug((f"⚠️ {error}" if error else f"✅ {reply}"))
-    await message.reply_text(
-        telegramify_markdown.markdownify(reply)[:4000],
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+    # If the final reply is identical to the last text block we already
+    # streamed, skip it — no point duplicating the message.
+    if error or reply != last_streamed_text["value"]:
+        await message.reply_text(
+            telegramify_markdown.markdownify(reply)[:4000],
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
 
 
 def main() -> None:
