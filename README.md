@@ -1,4 +1,4 @@
-# telegram-claude-bot
+# familiar
 
 Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent SDK, with Notion + Google Maps (and everything else) via a Composio MCP server.
 

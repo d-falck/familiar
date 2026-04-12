@@ -22,6 +22,10 @@ def _load_memory(path: str) -> str:
         p.write_text("(empty — update me with anything worth remembering)\n")
     return p.read_text()
 
+
+def _load_persona(path: str) -> str:
+    return Path(path).read_text().strip()
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -42,12 +46,14 @@ async def _allow_all(*_args, **_kwargs) -> PermissionResultAllow:
     return PermissionResultAllow()
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are a helpful assistant in a Telegram group chat. You only see messages \
-when a user @mentions you. Below is the group chat transcript in order, with \
-each line prefixed by the speaker's display name. Your own prior replies are \
-prefixed with 'assistant:'. Respond to the latest message that mentions you. \
-You have Composio tools available (Notion, Google Maps, Gmail, Calendar, \
-etc.) — use them when they help.
+{persona}
+
+You live in a Telegram group chat. You only see messages when a user \
+@mentions you. Below is the group chat transcript in order, with each line \
+prefixed by the speaker's display name. Your own prior replies are prefixed \
+with 'assistant:'. Respond to the latest message that mentions you. You have \
+Composio tools available (Notion, Google Maps, Gmail, Calendar, etc.) — use \
+them when they help.
 
 ## Memory (READ FIRST)
 
@@ -114,6 +120,7 @@ async def respond(
     mcp_servers: dict,
     model: str,
     memory_path: str,
+    persona_path: str,
     max_turns: int = 12,
     on_tool_use: Callable[[str, dict], Awaitable[None]] | None = None,
     on_text: Callable[[str], Awaitable[None]] | None = None,
@@ -125,6 +132,7 @@ async def respond(
         for m in messages
     )
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        persona=_load_persona(persona_path),
         memory_path=memory_path,
         memory_content=_load_memory(memory_path),
     )

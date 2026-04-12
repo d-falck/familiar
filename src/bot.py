@@ -166,6 +166,7 @@ def main() -> None:
         "model": os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6[1m]"),
         "max_turns": int(os.environ.get("MAX_AGENT_TURNS", "40")),
         "memory_path": os.environ.get("MEMORY_PATH", "./memory.md"),
+        "persona_path": os.environ.get("PERSONA_PATH", "prompts/flat_hunt.md"),
     }
     app.bot_data["history"] = History(
         os.environ.get("HISTORY_DB_PATH", "./history.sqlite")
