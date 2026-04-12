@@ -52,19 +52,26 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     author = user.username or user.full_name
     history.add_user(chat.id, author, text)
 
-    # Only respond when the bot is @-mentioned or directly replied to.
-    replied = message.reply_to_message
-    replied_to_bot = replied and replied.from_user and replied.from_user.username == bot_username
-    needle = f"@{bot_username}".lower()
-    mentioned = replied_to_bot or any(
-        e.type == MessageEntity.MENTION
-        and text[e.offset : e.offset + e.length].lower() == needle
-        for e in (message.entities or message.caption_entities or [])
-    )
-    if not mentioned:
+    # DMs: respond to every message. Groups: only @-mentions or replies to bot.
+    if chat.type == "private":
+        should_respond = True
+    else:
+        replied = message.reply_to_message
+        replied_to_bot = (
+            replied
+            and replied.from_user
+            and replied.from_user.username == bot_username
+        )
+        needle = f"@{bot_username}".lower()
+        should_respond = replied_to_bot or any(
+            e.type == MessageEntity.MENTION
+            and text[e.offset : e.offset + e.length].lower() == needle
+            for e in (message.entities or message.caption_entities or [])
+        )
+    if not should_respond:
         return
 
-    log.info("chat=%s @%s mentioned bot", chat.id, author)
+    log.info("chat=%s %s triggered bot", chat.id, author)
     debug_chat_id = context.application.bot_data.get("debug_chat_id")
     current_reaction = {"emoji": None}
 
@@ -180,7 +187,8 @@ def main() -> None:
     app.add_handler(CommandHandler("id", on_id))
     app.add_handler(
         MessageHandler(
-            filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION),
+            (filters.ChatType.GROUPS | filters.ChatType.PRIVATE)
+            & (filters.TEXT | filters.CAPTION),
             on_message,
         )
     )

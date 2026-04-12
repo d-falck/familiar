@@ -1,0 +1,25 @@
+app = "iris-familiar"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HISTORY_DB_PATH = "/data/history.sqlite"
+  MEMORY_PATH = "/data/memory.md"
+  PERSONA_PATH = "prompts/assistant.md"
+  ANTHROPIC_MODEL = "claude-opus-4-6[1m]"
+  MAX_AGENT_TURNS = "40"
+  CLAUDE_ENABLE_STREAM_WATCHDOG = "1"
+  MAX_MCP_OUTPUT_TOKENS = "25000"
+
+[[mounts]]
+  source = "bot_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[deploy]
+  strategy = "immediate"
