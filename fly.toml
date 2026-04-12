@@ -1,4 +1,4 @@
-app = "telegram-claude-bot"
+app = "d-falck-telegram-bot"
 primary_region = "iad"
 
 [build]
