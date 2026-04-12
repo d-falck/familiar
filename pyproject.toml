@@ -8,4 +8,5 @@ dependencies = [
     "composio>=0.11.5",
     "python-dotenv>=1.2.2",
     "python-telegram-bot>=21.9",
+    "telegramify-markdown>=1.1.2",
 ]

@@ -7,7 +7,20 @@ loop and returns a final text via ResultMessage.
 
 from __future__ import annotations
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+import logging
+
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    ResultMessage,
+)
+
+log = logging.getLogger(__name__)
+
+
+async def _allow_all(*_args, **_kwargs) -> PermissionResultAllow:
+    return PermissionResultAllow()
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant in a Telegram group chat. You only see "
@@ -36,11 +49,14 @@ async def respond(
         model=model,
         mcp_servers=mcp_servers,
         allowed_tools=["mcp__composio__*"],
-        permission_mode="bypassPermissions",
+        can_use_tool=_allow_all,
         setting_sources=[],
         max_turns=max_turns,
+        stderr=lambda line: log.error("claude stderr: %s", line),
     )
 
-    async for msg in query(prompt=transcript, options=options):
-        if isinstance(msg, ResultMessage):
-            return msg.result
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(transcript)
+        async for msg in client.receive_response():
+            if isinstance(msg, ResultMessage):
+                return msg.result

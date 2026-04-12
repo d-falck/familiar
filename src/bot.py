@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
+import telegramify_markdown
 from composio import Composio
 from dotenv import load_dotenv
 from telegram import MessageEntity, Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from claude_client import respond
@@ -46,10 +49,22 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     log.info("chat=%s @%s mentioned bot", chat.id, author)
-    await context.bot.send_chat_action(chat_id=chat.id, action="typing")
-    reply = await respond(history.load_as_messages(chat.id), **cfg)
+
+    async def keep_typing():
+        while True:
+            await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+            await asyncio.sleep(4)
+
+    typing = asyncio.create_task(keep_typing())
+    try:
+        reply = await respond(history.load_as_messages(chat.id), **cfg)
+    finally:
+        typing.cancel()
     history.add_assistant(chat.id, reply)
-    await message.reply_text(reply[:4000])
+    await message.reply_text(
+        telegramify_markdown.markdownify(reply)[:4000],
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
 
 
 def main() -> None:

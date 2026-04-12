@@ -11,11 +11,9 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Install uv for Python dependency management.
+# Install uv for Python dependency management. The claude-agent-sdk Python
+# package bundles its own claude CLI binary, so no separate install needed.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install the Claude Code CLI (required at runtime by claude-agent-sdk).
-RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Install Python dependencies first so they cache independently of source.
 COPY pyproject.toml uv.lock ./

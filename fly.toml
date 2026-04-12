@@ -1,4 +1,4 @@
-app = "d-falck-telegram-bot"
+app = "flat-hunt-bot"
 primary_region = "iad"
 
 [build]
