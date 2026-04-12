@@ -1,0 +1,22 @@
+app = "telegram-claude-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HISTORY_DB_PATH = "/data/history.sqlite"
+  ANTHROPIC_MODEL = "claude-opus-4-6[1m]"
+  MAX_AGENT_TURNS = "12"
+
+[[mounts]]
+  source = "bot_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Long-polling: no public services, single machine.
+[deploy]
+  strategy = "immediate"

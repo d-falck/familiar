@@ -1,0 +1,10 @@
+[project]
+name = "telegram-claude-bot"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.40.0",
+    "claude-agent-sdk>=0.1.58",
+    "python-dotenv>=1.2.2",
+    "python-telegram-bot>=21.9",
+]
