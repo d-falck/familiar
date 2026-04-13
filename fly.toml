@@ -17,6 +17,16 @@ primary_region = "iad"
   # expeditions with Read/Grep. 50k is ~5% of the 1M Opus context.
   MAX_MCP_OUTPUT_TOKENS = "25000"
   MEMORY_PATH = "/data/memory.md"
+  ATTACHMENTS_DIR = "/data/attachments"
+  STREAM_INTERMEDIATE_TEXT = "false"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
 
 [[mounts]]
   source = "bot_data"
@@ -24,7 +34,7 @@ primary_region = "iad"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "1024mb"
 
 # Long-polling: no public services, single machine.
 [deploy]

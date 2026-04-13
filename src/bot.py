@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 import telegramify_markdown
+from aiohttp import web
 from composio import Composio
 from dotenv import load_dotenv
 from telegram import MessageEntity, ReactionTypeEmoji, Update
@@ -15,6 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from claude_client import respond
 from history import History
+from webhook import build_app as build_webhook_app
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -42,12 +45,26 @@ REACTION_ERROR = "💔"
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat = update.effective_chat
-    text = message.text or message.caption
+    text = message.text or message.caption or ""
     user = message.from_user
 
     history: History = context.application.bot_data["history"]
     cfg: dict = context.application.bot_data["cfg"]
+    attachments_dir: Path = context.application.bot_data["attachments_dir"]
     bot_username = context.bot.username
+
+    # If the message includes an image, download it to the attachments
+    # volume and append a path reference so Claude can Read it.
+    if message.photo:
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        photo = message.photo[-1]  # highest-resolution variant
+        file = await photo.get_file()
+        path = attachments_dir / f"{chat.id}_{message.message_id}.jpg"
+        await file.download_to_drive(path)
+        text = (text + f"\n[attached image: {path}]").strip()
+
+    if not text:
+        return
 
     author = user.username or user.full_name
     history.add_user(chat.id, author, text)
@@ -73,6 +90,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     log.info("chat=%s %s triggered bot", chat.id, author)
     debug_chat_id = context.application.bot_data.get("debug_chat_id")
+    stream_intermediate = context.application.bot_data.get("stream_intermediate_text", True)
     current_reaction = {"emoji": None}
 
     async def set_reaction(emoji: str | None) -> None:
@@ -125,9 +143,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     async def on_text(text: str) -> None:
         if not text.strip():
             return
-        last_streamed_text["value"] = text
         await send_debug(f"💭 {text}")
-        await send_to_main(text)
+        if stream_intermediate:
+            last_streamed_text["value"] = text
+            await send_to_main(text)
 
     async def on_thinking(text: str) -> None:
         await set_reaction(REACTION_THINKING)
@@ -172,7 +191,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
-def main() -> None:
+async def _run() -> None:
     load_dotenv()
 
     session = Composio().create(user_id=os.environ["COMPOSIO_USER_ID"])
@@ -184,18 +203,25 @@ def main() -> None:
         }
     }
 
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
-    app.bot_data["cfg"] = {
+    respond_cfg = {
         "mcp_servers": mcp_servers,
         "model": os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6[1m]"),
         "max_turns": int(os.environ.get("MAX_AGENT_TURNS", "40")),
         "memory_path": os.environ.get("MEMORY_PATH", "./memory.md"),
         "persona_path": os.environ.get("PERSONA_PATH", "prompts/flat_hunt.md"),
     }
-    app.bot_data["history"] = History(
-        os.environ.get("HISTORY_DB_PATH", "./history.sqlite")
-    )
+    history = History(os.environ.get("HISTORY_DB_PATH", "./history.sqlite"))
+
+    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+    app.bot_data["cfg"] = respond_cfg
+    app.bot_data["history"] = history
     app.bot_data["debug_chat_id"] = os.environ.get("DEBUG_CHAT_ID")
+    app.bot_data["attachments_dir"] = Path(
+        os.environ.get("ATTACHMENTS_DIR", "./attachments")
+    )
+    app.bot_data["stream_intermediate_text"] = (
+        os.environ.get("STREAM_INTERMEDIATE_TEXT", "true").lower() != "false"
+    )
 
     async def on_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
@@ -205,13 +231,50 @@ def main() -> None:
     app.add_handler(
         MessageHandler(
             (filters.ChatType.GROUPS | filters.ChatType.PRIVATE)
-            & (filters.TEXT | filters.CAPTION),
+            & (filters.TEXT | filters.CAPTION | filters.PHOTO),
             on_message,
         )
     )
 
-    log.info("starting long-polling")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    log.info("telegram long-polling started")
+
+    # HTTP server (always running so Fly's http_service has something to
+    # route to — even if only /health). The /composio/webhook route is
+    # only added when the trigger secret + target chat are configured.
+    webhook_secret = os.environ.get("COMPOSIO_WEBHOOK_SECRET")
+    trigger_chat_raw = os.environ.get("TRIGGER_CHAT_ID")
+    aiohttp_app = build_webhook_app(
+        secret=webhook_secret,
+        target_chat_id=int(trigger_chat_raw) if trigger_chat_raw else None,
+        telegram_bot=app.bot,
+        history=history,
+        respond_fn=respond,
+        respond_cfg=respond_cfg,
+    )
+    runner = web.AppRunner(aiohttp_app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    if webhook_secret and trigger_chat_raw:
+        log.info("composio webhook listening on 0.0.0.0:%d", port)
+    else:
+        log.info("http /health listening on 0.0.0.0:%d (webhook disabled)", port)
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
+
+def main() -> None:
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

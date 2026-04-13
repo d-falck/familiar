@@ -12,6 +12,15 @@ primary_region = "iad"
   MAX_AGENT_TURNS = "40"
   CLAUDE_ENABLE_STREAM_WATCHDOG = "1"
   MAX_MCP_OUTPUT_TOKENS = "25000"
+  ATTACHMENTS_DIR = "/data/attachments"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
 
 [[mounts]]
   source = "bot_data"
@@ -19,7 +28,7 @@ primary_region = "iad"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "1024mb"
 
 [deploy]
   strategy = "immediate"
