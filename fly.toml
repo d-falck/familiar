@@ -19,6 +19,7 @@ primary_region = "iad"
   MEMORY_PATH = "/data/memory.md"
   ATTACHMENTS_DIR = "/data/attachments"
   STREAM_INTERMEDIATE_TEXT = "false"
+  TIMEZONE = "Europe/London"
   PORT = "8080"
 
 [http_service]

@@ -13,6 +13,8 @@ primary_region = "iad"
   CLAUDE_ENABLE_STREAM_WATCHDOG = "1"
   MAX_MCP_OUTPUT_TOKENS = "25000"
   ATTACHMENTS_DIR = "/data/attachments"
+  SCHEDULE_INTERVAL_SECONDS = "3600"
+  TIMEZONE = "Europe/London"
   PORT = "8080"
 
 [http_service]

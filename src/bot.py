@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import telegramify_markdown
 from aiohttp import web
@@ -191,6 +192,35 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+async def _run_scheduler(
+    *,
+    interval_seconds: int,
+    chat_id: int,
+    tz,
+    telegram_bot,
+    history,
+    respond_cfg: dict,
+) -> None:
+    from datetime import datetime
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            now = datetime.now(tz).strftime("%a %Y-%m-%d %H:%M %Z")
+            prompt = (
+                f"[scheduled check-in @ {now}] Anything worth doing "
+                "proactively right now? Silence is the default."
+            )
+            messages = history.load_as_messages(chat_id)
+            messages.append({"role": "user", "content": prompt})
+            reply = await respond(messages, **respond_cfg)
+            if reply and reply.strip() and reply.strip() != "(no response)":
+                history.add_assistant(chat_id, reply)
+                await telegram_bot.send_message(chat_id=chat_id, text=reply[:4000])
+        except Exception:
+            log.exception("scheduled check-in failed")
+
+
 async def _run() -> None:
     load_dotenv()
 
@@ -263,6 +293,24 @@ async def _run() -> None:
         log.info("composio webhook listening on 0.0.0.0:%d", port)
     else:
         log.info("http /health listening on 0.0.0.0:%d (webhook disabled)", port)
+
+    # In-process scheduler: periodically nudge the agent so it has a chance
+    # to act proactively (check email, surface reminders, etc). Silence is
+    # the default; the agent should return nothing for uneventful ticks.
+    schedule_interval_raw = os.environ.get("SCHEDULE_INTERVAL_SECONDS")
+    if schedule_interval_raw and trigger_chat_raw:
+        tz = ZoneInfo(os.environ.get("TIMEZONE", "UTC"))
+        asyncio.create_task(
+            _run_scheduler(
+                interval_seconds=int(schedule_interval_raw),
+                chat_id=int(trigger_chat_raw),
+                tz=tz,
+                telegram_bot=app.bot,
+                history=history,
+                respond_cfg=respond_cfg,
+            )
+        )
+        log.info("scheduler running every %ss (tz=%s)", schedule_interval_raw, tz)
 
     try:
         await asyncio.Event().wait()
