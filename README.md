@@ -21,7 +21,8 @@ Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent S
 | Name | Required | Notes |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | from @BotFather |
-| `ANTHROPIC_API_KEY` | yes | consumed by the Claude Code CLI under the hood |
+| `ANTHROPIC_API_KEY` | either | pay-as-you-go API credits (`sk-ant-api...`). Set this OR `CLAUDE_CODE_OAUTH_TOKEN`. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | either | long-lived Claude Max/Pro subscription token (`sk-ant-oat...`). Generate once with `claude setup-token` on any authed machine, paste the output. Takes precedence if both are set. No file or refresh management. |
 | `COMPOSIO_API_KEY` | yes | read by the `composio` SDK at startup |
 | `COMPOSIO_USER_ID` | yes | your Composio user id (e.g. `user_7svs9s`) — the bot creates a Tool Router session for this user at startup, which exposes all your connected toolkits |
 | `ANTHROPIC_MODEL` | no | default `claude-opus-4-6[1m]` |
@@ -56,9 +57,12 @@ fly launch --no-deploy         # accept fly.toml
 fly volumes create bot_data --size 1 --region iad
 fly secrets set \
   TELEGRAM_BOT_TOKEN=... \
-  ANTHROPIC_API_KEY=... \
   COMPOSIO_API_KEY=... \
-  COMPOSIO_MCP_URL=...
+  COMPOSIO_USER_ID=...
+# Pick ONE of the following for Claude auth:
+fly secrets set ANTHROPIC_API_KEY=sk-ant-api...
+#   — OR —
+fly secrets set CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat...   # generated via `claude setup-token` on any authed machine
 fly deploy
 ```
 
