@@ -19,6 +19,7 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 
 log = logging.getLogger("webhook")
@@ -27,6 +28,18 @@ TOLERANCE_SECONDS = 300
 # Remember recent webhook-ids so we can dedupe retries even if we ACK'd
 # successfully. Bounded LRU so it never grows unbounded.
 _SEEN_IDS_MAX = 1000
+# Sentinel string the agent should return when there's nothing to say. The
+# agent framework always produces a final text turn, so a natural-language
+# "silence is the default" instruction doesn't work — we need a literal
+# token to match on exactly.
+SILENCE_SENTINEL = "<silent>"
+
+
+def _is_silent(reply: str | None) -> bool:
+    if not reply:
+        return True
+    stripped = reply.strip()
+    return not stripped or stripped == SILENCE_SENTINEL or stripped == "(no response)"
 
 
 def _candidate_keys(secret: str) -> list[bytes]:
@@ -93,8 +106,9 @@ def _format_event(payload: dict[str, Any]) -> str:
         "Process this event and take whatever action is appropriate. "
         "Silence is the default: unless a standing instruction in memory "
         "or context warrants a reply, or something about this event "
-        "genuinely needs the user's attention right now, stay silent — "
-        "respond with nothing at all."
+        f"genuinely needs the user's attention right now, respond with "
+        f"EXACTLY `{SILENCE_SENTINEL}` and nothing else — no commentary, "
+        "no acknowledgement."
     )
 
 
@@ -102,6 +116,8 @@ def build_app(
     *,
     secret: str | None = None,
     target_chat_id: int | None = None,
+    voice_dispatch_secret: str | None = None,
+    mcp_proxy_upstream: str | None = None,
     telegram_bot=None,
     history=None,
     respond_fn=None,
@@ -147,7 +163,7 @@ def build_app(
             log.exception("trigger respond failed")
             reply = f"⚠️ trigger handler failed: {exc}"
 
-        if reply.strip() and reply.strip() != "(no response)":
+        if not _is_silent(reply):
             # Persist the reply so the user can refer to it in future turns,
             # but as a single terse assistant row (not the original event).
             history.add_assistant(target_chat_id, reply)
@@ -156,7 +172,7 @@ def build_app(
             except Exception:
                 log.exception("failed to post trigger reply to telegram")
         else:
-            log.info("trigger handler produced no user-facing reply — skipping telegram send")
+            log.info("trigger handler chose silence — skipping telegram send")
 
     async def webhook_handler(request: web.Request) -> web.Response:
         body = await request.read()
@@ -184,6 +200,87 @@ def build_app(
         asyncio.create_task(_process_event(payload))
         return web.Response(status=200, text="ok")
 
+    async def _process_voice_dispatch(instruction: str) -> None:
+        log.info("dispatching voice-call task: %s", instruction[:120])
+        messages = history.load_as_messages(target_chat_id)
+        messages.append({"role": "user", "content": f"[voice call dispatch] {instruction}"})
+        try:
+            reply = await respond_fn(messages, **respond_cfg)
+        except Exception as exc:
+            log.exception("voice dispatch respond failed")
+            reply = f"⚠️ voice dispatch failed: {exc}"
+        if reply.strip() and reply.strip() != "(no response)":
+            history.add_assistant(target_chat_id, reply)
+            try:
+                await telegram_bot.send_message(chat_id=target_chat_id, text=reply[:4000])
+            except Exception:
+                log.exception("failed to post voice dispatch reply to telegram")
+
+    async def voice_dispatch_handler(request: web.Request) -> web.Response:
+        # ElevenLabs webhook-tool config sends the shared secret as a header.
+        provided = request.headers.get("x-dispatch-secret", "")
+        if not voice_dispatch_secret or not hmac.compare_digest(
+            provided, voice_dispatch_secret
+        ):
+            log.warning("voice dispatch rejected: bad or missing secret header")
+            return web.Response(status=401, text="invalid secret")
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json")
+
+        instruction = (payload.get("instruction") or "").strip()
+        if not instruction:
+            return web.Response(status=400, text="missing 'instruction'")
+
+        # ACK immediately, dispatch in background.
+        asyncio.create_task(_process_voice_dispatch(instruction))
+        return web.json_response({"status": "dispatched"})
+
+    async def mcp_proxy_handler(request: web.Request) -> web.StreamResponse:
+        """Transparent MCP Streamable-HTTP proxy.
+
+        Forwards the request to `mcp_proxy_upstream`, forcing the spec-
+        compliant `Accept: application/json, text/event-stream` header.
+        Exists because some MCP clients (ElevenLabs) send only
+        `application/json`, which Composio's server rejects with 406.
+        """
+        hop_by_hop = {
+            "host", "content-length", "connection", "transfer-encoding",
+            "keep-alive", "proxy-authenticate", "proxy-authorization",
+            "te", "trailers", "upgrade",
+        }
+        fwd_headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in hop_by_hop
+        }
+        fwd_headers["Accept"] = "application/json, text/event-stream"
+        body = await request.read()
+
+        timeout = aiohttp.ClientTimeout(total=None, sock_read=300)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.request(
+                request.method,
+                mcp_proxy_upstream,
+                data=body if body else None,
+                headers=fwd_headers,
+                allow_redirects=False,
+            ) as upstream:
+                resp_headers = {
+                    k: v for k, v in upstream.headers.items()
+                    if k.lower() not in hop_by_hop
+                }
+                response = web.StreamResponse(
+                    status=upstream.status,
+                    headers=resp_headers,
+                )
+                await response.prepare(request)
+                async for chunk in upstream.content.iter_any():
+                    await response.write(chunk)
+                await response.write_eof()
+                return response
+
     async def health(_request: web.Request) -> web.Response:
         return web.Response(status=200, text="ok")
 
@@ -191,4 +288,9 @@ def build_app(
     app.router.add_get("/health", health)
     if secret and target_chat_id is not None:
         app.router.add_post("/composio/webhook", webhook_handler)
+    if voice_dispatch_secret and target_chat_id is not None:
+        app.router.add_post("/voice/dispatch", voice_dispatch_handler)
+    if mcp_proxy_upstream:
+        for method in ("POST", "GET", "DELETE"):
+            app.router.add_route(method, "/mcp", mcp_proxy_handler)
     return app

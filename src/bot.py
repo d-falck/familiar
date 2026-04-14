@@ -18,6 +18,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from claude_client import respond
 from history import History
+from voice import transcribe as transcribe_voice
 from webhook import build_app as build_webhook_app
 
 logging.basicConfig(
@@ -63,6 +64,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         path = attachments_dir / f"{chat.id}_{message.message_id}.jpg"
         await file.download_to_drive(path)
         text = (text + f"\n[attached image: {path}]").strip()
+
+    # If the message is a voice note, download and transcribe with Whisper.
+    if message.voice:
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        file = await message.voice.get_file()
+        audio_path = attachments_dir / f"{chat.id}_{message.message_id}.ogg"
+        await file.download_to_drive(audio_path)
+        try:
+            transcript = await transcribe_voice(audio_path)
+        except Exception:
+            log.exception("voice transcription failed")
+            transcript = "(voice note — transcription failed)"
+        text = (text + f"\n[voice] {transcript}").strip()
 
     if not text:
         return
@@ -192,6 +206,32 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+SILENCE_SENTINEL = "<silent>"
+
+
+def _is_silent(reply: str | None) -> bool:
+    if not reply:
+        return True
+    stripped = reply.strip()
+    return not stripped or stripped == SILENCE_SENTINEL or stripped == "(no response)"
+
+
+def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
+    """Seconds until the next interval boundary aligned to local midnight.
+
+    For interval_seconds=3600 this means the next full hour in the given
+    timezone (e.g. 15:00:00 local). Drift-free: recomputed each iteration
+    so processing time doesn't shift subsequent firings.
+    """
+    from datetime import datetime
+
+    now = datetime.now(tz)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = (now - midnight).total_seconds()
+    next_boundary = (int(elapsed // interval_seconds) + 1) * interval_seconds
+    return next_boundary - elapsed
+
+
 async def _run_scheduler(
     *,
     interval_seconds: int,
@@ -204,17 +244,19 @@ async def _run_scheduler(
     from datetime import datetime
 
     while True:
-        await asyncio.sleep(interval_seconds)
+        await asyncio.sleep(_seconds_to_next_boundary(interval_seconds, tz))
         try:
             now = datetime.now(tz).strftime("%a %Y-%m-%d %H:%M %Z")
             prompt = (
-                f"[scheduled check-in @ {now}] Anything worth doing "
-                "proactively right now? Silence is the default."
+                f"[scheduled check-in @ {now}] Anything worth doing right "
+                "now? If yes, act and report. If nothing worth the user's "
+                f"attention, respond with EXACTLY `{SILENCE_SENTINEL}` and "
+                "nothing else — no commentary, no acknowledgement."
             )
             messages = history.load_as_messages(chat_id)
             messages.append({"role": "user", "content": prompt})
             reply = await respond(messages, **respond_cfg)
-            if reply and reply.strip() and reply.strip() != "(no response)":
+            if not _is_silent(reply):
                 history.add_assistant(chat_id, reply)
                 await telegram_bot.send_message(chat_id=chat_id, text=reply[:4000])
         except Exception:
@@ -261,7 +303,7 @@ async def _run() -> None:
     app.add_handler(
         MessageHandler(
             (filters.ChatType.GROUPS | filters.ChatType.PRIVATE)
-            & (filters.TEXT | filters.CAPTION | filters.PHOTO),
+            & (filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VOICE),
             on_message,
         )
     )
@@ -276,9 +318,13 @@ async def _run() -> None:
     # only added when the trigger secret + target chat are configured.
     webhook_secret = os.environ.get("COMPOSIO_WEBHOOK_SECRET")
     trigger_chat_raw = os.environ.get("TRIGGER_CHAT_ID")
+    voice_dispatch_secret = os.environ.get("VOICE_DISPATCH_SECRET")
+    mcp_proxy_upstream = os.environ.get("MCP_PROXY_UPSTREAM")
     aiohttp_app = build_webhook_app(
         secret=webhook_secret,
         target_chat_id=int(trigger_chat_raw) if trigger_chat_raw else None,
+        voice_dispatch_secret=voice_dispatch_secret,
+        mcp_proxy_upstream=mcp_proxy_upstream,
         telegram_bot=app.bot,
         history=history,
         respond_fn=respond,
