@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
