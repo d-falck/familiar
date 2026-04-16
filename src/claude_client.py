@@ -95,6 +95,18 @@ task details, or pure speculation.
 {memory_content}
 </memory>
 
+## Cross-chat history
+
+The <transcript> above is only the *current* chat. All your conversations \
+(DMs + groups) live in a single SQLite file at `{history_path}`, schema \
+`messages(id, chat_id, role, author, content, created_at)`. When a user \
+references something said in another chat, or you need cross-chat \
+context, query it via Bash — e.g. \
+`sqlite3 {history_path} "SELECT chat_id, author, substr(content,1,200) \
+FROM messages WHERE content LIKE '%keyword%' ORDER BY id DESC LIMIT 20"`. \
+Persist any stable chat_id → purpose mapping in memory so you don't have \
+to rediscover it.
+
 ## Style
 
 - Be concise. Write for a chat UI, not a document.
@@ -144,6 +156,7 @@ async def respond(
     model: str,
     memory_path: str,
     persona_path: str,
+    history_path: str,
     max_turns: int = 12,
     on_tool_use: Callable[[str, dict], Awaitable[None]] | None = None,
     on_text: Callable[[str], Awaitable[None]] | None = None,
@@ -159,6 +172,7 @@ async def respond(
         persona=_load_persona(persona_path),
         memory_path=memory_path,
         memory_content=_load_memory(memory_path),
+        history_path=history_path,
     )
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,

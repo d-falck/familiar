@@ -22,24 +22,14 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
+from silence import SILENCE_INSTRUCTION, is_silent
+
 log = logging.getLogger("webhook")
 
 TOLERANCE_SECONDS = 300
 # Remember recent webhook-ids so we can dedupe retries even if we ACK'd
 # successfully. Bounded LRU so it never grows unbounded.
 _SEEN_IDS_MAX = 1000
-# Sentinel string the agent should return when there's nothing to say. The
-# agent framework always produces a final text turn, so a natural-language
-# "silence is the default" instruction doesn't work — we need a literal
-# token to match on exactly.
-SILENCE_SENTINEL = "<silent>"
-
-
-def _is_silent(reply: str | None) -> bool:
-    if not reply:
-        return True
-    stripped = reply.strip()
-    return not stripped or stripped == SILENCE_SENTINEL or stripped == "(no response)"
 
 
 def _candidate_keys(secret: str) -> list[bytes]:
@@ -103,12 +93,8 @@ def _format_event(payload: dict[str, Any]) -> str:
     return (
         f"A Composio trigger fired: {trigger_name}\n\n"
         f"<event>\n{data_str}\n</event>\n\n"
-        "Process this event and take whatever action is appropriate. "
-        "Silence is the default: unless a standing instruction in memory "
-        "or context warrants a reply, or something about this event "
-        f"genuinely needs the user's attention right now, respond with "
-        f"EXACTLY `{SILENCE_SENTINEL}` and nothing else — no commentary, "
-        "no acknowledgement."
+        f"Process this event and take whatever action is appropriate.\n\n"
+        f"{SILENCE_INSTRUCTION}"
     )
 
 
@@ -163,7 +149,7 @@ def build_app(
             log.exception("trigger respond failed")
             reply = f"⚠️ trigger handler failed: {exc}"
 
-        if not _is_silent(reply):
+        if not is_silent(reply):
             # Persist the reply so the user can refer to it in future turns,
             # but as a single terse assistant row (not the original event).
             history.add_assistant(target_chat_id, reply)
@@ -209,7 +195,7 @@ def build_app(
         except Exception as exc:
             log.exception("voice dispatch respond failed")
             reply = f"⚠️ voice dispatch failed: {exc}"
-        if reply.strip() and reply.strip() != "(no response)":
+        if not is_silent(reply):
             history.add_assistant(target_chat_id, reply)
             try:
                 await telegram_bot.send_message(chat_id=target_chat_id, text=reply[:4000])

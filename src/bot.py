@@ -18,6 +18,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from claude_client import respond
 from history import History
+from silence import SILENCE_INSTRUCTION, is_silent
 from voice import transcribe as transcribe_voice
 from webhook import build_app as build_webhook_app
 
@@ -206,16 +207,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
-SILENCE_SENTINEL = "<silent>"
-
-
-def _is_silent(reply: str | None) -> bool:
-    if not reply:
-        return True
-    stripped = reply.strip()
-    return not stripped or stripped == SILENCE_SENTINEL or stripped == "(no response)"
-
-
 def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
     """Seconds until the next interval boundary aligned to local midnight.
 
@@ -249,14 +240,12 @@ async def _run_scheduler(
             now = datetime.now(tz).strftime("%a %Y-%m-%d %H:%M %Z")
             prompt = (
                 f"[scheduled check-in @ {now}] Anything worth doing right "
-                "now? If yes, act and report. If nothing worth the user's "
-                f"attention, respond with EXACTLY `{SILENCE_SENTINEL}` and "
-                "nothing else — no commentary, no acknowledgement."
+                f"now? If yes, act and report.\n\n{SILENCE_INSTRUCTION}"
             )
             messages = history.load_as_messages(chat_id)
             messages.append({"role": "user", "content": prompt})
             reply = await respond(messages, **respond_cfg)
-            if not _is_silent(reply):
+            if not is_silent(reply):
                 history.add_assistant(chat_id, reply)
                 await telegram_bot.send_message(chat_id=chat_id, text=reply[:4000])
         except Exception:
@@ -275,14 +264,16 @@ async def _run() -> None:
         }
     }
 
+    history_path = os.environ.get("HISTORY_DB_PATH", "./history.sqlite")
     respond_cfg = {
         "mcp_servers": mcp_servers,
         "model": os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6[1m]"),
         "max_turns": int(os.environ.get("MAX_AGENT_TURNS", "40")),
         "memory_path": os.environ.get("MEMORY_PATH", "./memory.md"),
         "persona_path": os.environ.get("PERSONA_PATH", "prompts/flat_hunt.md"),
+        "history_path": history_path,
     }
-    history = History(os.environ.get("HISTORY_DB_PATH", "./history.sqlite"))
+    history = History(history_path)
 
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.bot_data["cfg"] = respond_cfg
