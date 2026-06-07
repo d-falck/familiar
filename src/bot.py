@@ -45,16 +45,62 @@ REACTION_WORKING = "✍"
 REACTION_THINKING = "🤔"
 REACTION_ERROR = "💔"
 
+_DM_CONTEXT_SEP = (
+    "[Above is your main DM history — shared background you carry into every "
+    "topic. This topic's own conversation follows.]"
+)
+
+
+def _session_lock(bot_data: dict, chat_id: int, thread_id: int) -> asyncio.Lock:
+    """One lock per (chat, topic) session: turns within a session are
+    serialized (a follow-up waits for the prior turn), while different
+    sessions run in parallel."""
+    locks = bot_data["session_locks"]
+    key = (chat_id, thread_id)
+    lock = locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[key] = lock
+    return lock
+
+
+def _load_session_context(
+    history: History,
+    *,
+    main_dm_chat_id: int | None,
+    chat_id: int,
+    thread_id: int,
+    workspace_chat_ids: set[int],
+) -> list[dict]:
+    """Transcript for a session. Forum-topic sessions in a workspace group are
+    prefixed with the main DM history so they share that background on top of
+    their own thread; the DM and ordinary chats just get their own."""
+    own = history.load_as_messages(chat_id, thread_id)
+    if (
+        main_dm_chat_id
+        and chat_id in workspace_chat_ids
+        and not (chat_id == main_dm_chat_id and thread_id == 0)
+    ):
+        base = history.load_as_messages(main_dm_chat_id, 0)
+        if base:
+            return base + [{"role": "user", "content": _DM_CONTEXT_SEP}] + own
+    return own
+
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat = update.effective_chat
     text = message.text or message.caption or ""
     user = message.from_user
+    # Forum-topic id (0 for DMs / non-topic chats). Each topic is its own
+    # isolated session: separate history, serialized within itself, parallel
+    # with other topics and the DM.
+    thread_id = message.message_thread_id or 0
 
     history: History = context.application.bot_data["history"]
     cfg: dict = context.application.bot_data["cfg"]
     attachments_dir: Path = context.application.bot_data["attachments_dir"]
+    workspace_chat_ids: set[int] = context.application.bot_data["workspace_chat_ids"]
     bot_username = context.bot.username
 
     # If the message includes an image, download it to the attachments
@@ -84,10 +130,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     author = user.username or user.full_name
-    history.add_user(chat.id, author, text)
+    history.add_user(chat.id, author, text, thread_id=thread_id)
 
-    # DMs: respond to every message. Groups: only @-mentions or replies to bot.
-    if chat.type == "private":
+    # DMs and configured workspace groups: respond to every message. Other
+    # groups: only @-mentions or replies to bot.
+    if chat.type == "private" or chat.id in workspace_chat_ids:
         should_respond = True
     else:
         replied = message.reply_to_message
@@ -145,6 +192,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         try:
             await context.bot.send_message(
                 chat_id=chat.id,
+                message_thread_id=thread_id or None,
                 text=telegramify_markdown.markdownify(text)[:4000],
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
@@ -175,37 +223,52 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     async def keep_typing():
         while True:
-            await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+            await context.bot.send_chat_action(
+                chat_id=chat.id, message_thread_id=thread_id or None, action="typing"
+            )
             await asyncio.sleep(4)
 
-    typing = asyncio.create_task(keep_typing())
-    error = None
-    try:
-        reply = await respond(
-            history.load_as_messages(chat.id),
-            on_tool_use=on_tool_use,
-            on_text=on_text,
-            on_thinking=on_thinking,
-            on_tool_result=on_tool_result,
-            **cfg,
-        )
-    except Exception as exc:
-        log.exception("respond failed")
-        error = exc
-        reply = f"⚠️ {exc}"
-    finally:
-        typing.cancel()
+    # Serialize turns within this session (chat + topic) so a follow-up waits
+    # for the prior turn and continues the right context; different sessions
+    # still run in parallel. The transcript is loaded inside the lock so it
+    # reflects any turn that completed while this message was queued.
+    lock = _session_lock(context.application.bot_data, chat.id, thread_id)
+    async with lock:
+        typing = asyncio.create_task(keep_typing())
+        error = None
+        try:
+            messages = _load_session_context(
+                history,
+                main_dm_chat_id=context.application.bot_data["main_dm_chat_id"],
+                chat_id=chat.id,
+                thread_id=thread_id,
+                workspace_chat_ids=workspace_chat_ids,
+            )
+            reply = await respond(
+                messages,
+                on_tool_use=on_tool_use,
+                on_text=on_text,
+                on_thinking=on_thinking,
+                on_tool_result=on_tool_result,
+                **cfg,
+            )
+        except Exception as exc:
+            log.exception("respond failed")
+            error = exc
+            reply = f"⚠️ {exc}"
+        finally:
+            typing.cancel()
 
-    history.add_assistant(chat.id, reply)
-    await set_reaction(REACTION_ERROR if error else None)
-    await send_debug((f"⚠️ {error}" if error else f"✅ {reply}"))
-    # If the final reply is identical to the last text block we already
-    # streamed, skip it — no point duplicating the message.
-    if error or reply != last_streamed_text["value"]:
-        await message.reply_text(
-            telegramify_markdown.markdownify(reply)[:4000],
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        history.add_assistant(chat.id, reply, thread_id=thread_id)
+        await set_reaction(REACTION_ERROR if error else None)
+        await send_debug((f"⚠️ {error}" if error else f"✅ {reply}"))
+        # If the final reply is identical to the last text block we already
+        # streamed, skip it — no point duplicating the message.
+        if error or reply != last_streamed_text["value"]:
+            await message.reply_text(
+                telegramify_markdown.markdownify(reply)[:4000],
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
 
 
 def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
@@ -303,6 +366,14 @@ async def _run() -> None:
     )
     log.info("agent backend=%s model=%s", backend, model)
 
+    # Workspace groups: chats where she answers every message (no @-mention
+    # needed) and treats forum topics as parallel sessions.
+    workspace_chat_ids = {
+        int(x)
+        for x in os.environ.get("WORKSPACE_CHAT_IDS", "").replace(" ", "").split(",")
+        if x
+    }
+
     history_path = os.environ.get("HISTORY_DB_PATH", "./history.sqlite")
     respond_cfg = {
         "backend": backend,
@@ -314,6 +385,7 @@ async def _run() -> None:
         "history_path": history_path,
         "self_repo_dir": self_repo_dir,
         "self_deploy_cmd": os.environ.get("SELF_DEPLOY_CMD"),
+        "workspace_chat_ids": sorted(workspace_chat_ids),
     }
     history = History(history_path)
 
@@ -335,6 +407,11 @@ async def _run() -> None:
     )
     app.bot_data["stream_intermediate_text"] = (
         os.environ.get("STREAM_INTERMEDIATE_TEXT", "true").lower() != "false"
+    )
+    app.bot_data["workspace_chat_ids"] = workspace_chat_ids
+    app.bot_data["session_locks"] = {}
+    app.bot_data["main_dm_chat_id"] = (
+        int(os.environ["MAIN_DM_CHAT_ID"]) if os.environ.get("MAIN_DM_CHAT_ID") else None
     )
 
     async def on_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

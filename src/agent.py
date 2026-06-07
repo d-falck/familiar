@@ -25,6 +25,7 @@ async def respond(
     history_path: str,
     self_repo_dir: str | None = None,
     self_deploy_cmd: str | None = None,
+    workspace_chat_ids: list[int] | None = None,
     max_turns: int = 40,
     on_tool_use: Callable[[str, dict], Awaitable[None]] | None = None,
     on_text: Callable[[str], Awaitable[None]] | None = None,
@@ -37,6 +38,7 @@ async def respond(
         history_path=history_path,
         self_repo_dir=self_repo_dir,
         self_deploy_cmd=self_deploy_cmd,
+        workspace_chat_ids=workspace_chat_ids,
     )
     callbacks = dict(
         on_tool_use=on_tool_use,

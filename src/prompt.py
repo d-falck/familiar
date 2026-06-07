@@ -73,17 +73,18 @@ task details, or pure speculation.
 {memory_content}
 </memory>
 
-## Cross-chat history
+## Cross-session history
 
-The <transcript> above is only the *current* chat. All your conversations \
-(DMs + groups) live in a single SQLite file at `{history_path}`, schema \
-`messages(id, chat_id, role, author, content, created_at)`. When a user \
-references something said in another chat, or you need cross-chat \
-context, query it via Bash — e.g. \
-`sqlite3 {history_path} "SELECT chat_id, author, substr(content,1,200) \
-FROM messages WHERE content LIKE '%keyword%' ORDER BY id DESC LIMIT 20"`. \
-Persist any stable chat_id → purpose mapping in memory so you don't have \
-to rediscover it.
+The <transcript> above is the current session. Every conversation lives in \
+a single SQLite file at `{history_path}`, schema `messages(id, chat_id, \
+thread_id, role, author, content, created_at)`. A session is a \
+`(chat_id, thread_id)` pair — `thread_id` is 0 for DMs and the forum-topic \
+id otherwise. When you need context from another session (another topic, \
+another chat), query it via Bash — e.g. \
+`sqlite3 {history_path} "SELECT chat_id, thread_id, author, \
+substr(content,1,200) FROM messages WHERE content LIKE '%keyword%' ORDER BY \
+id DESC LIMIT 20"`. Persist any stable session → purpose mapping in memory \
+so you don't have to rediscover it.
 
 ## Style
 
@@ -149,6 +150,32 @@ asked or clearly warranted.
 - After deploying, tell Damon exactly what you changed and why."""
 
 
+# Appended only in workspace groups that use forum topics.
+FORUM_TOPICS_SECTION = """\
+
+## Parallel sessions (forum topics)
+
+You operate in workspace group(s) {workspace_chat_ids} where each forum \
+topic is a separate, parallel session. Different topics run at the same \
+time; messages within one topic are handled in order. This topic's \
+transcript already includes the main DM history as shared background plus \
+this topic's own conversation. To pull in another topic's or chat's \
+context, query the history DB (see Cross-session history above).
+
+You can create and close topics yourself via the Telegram Bot API using \
+`$TELEGRAM_BOT_TOKEN` from the env (you're an admin of the group). Spin up \
+a topic to kick off a new parallel workstream; close one when its task is \
+done. With Bash + curl against `https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/<method>`:
+
+- `createForumTopic` (chat_id, name) — start a new session/topic.
+- `closeForumTopic` (chat_id, message_thread_id) — close a finished one.
+- `reopenForumTopic` / `editForumTopic` / `deleteForumTopic` as needed.
+
+Create a topic when the user asks for something that deserves its own \
+parallel track, or when a thread is getting crowded. Tell the user which \
+topic you opened."""
+
+
 def render_transcript(messages: list[dict]) -> str:
     body = "\n".join(
         f"assistant: {m['content']}" if m["role"] == "assistant" else m["content"]
@@ -164,6 +191,7 @@ def build_system_prompt(
     history_path: str,
     self_repo_dir: str | None = None,
     self_deploy_cmd: str | None = None,
+    workspace_chat_ids: list[int] | None = None,
 ) -> str:
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         persona=load_persona(persona_path),
@@ -171,6 +199,10 @@ def build_system_prompt(
         memory_content=load_memory(memory_path),
         history_path=history_path,
     )
+    if workspace_chat_ids:
+        prompt += FORUM_TOPICS_SECTION.format(
+            workspace_chat_ids=", ".join(str(c) for c in workspace_chat_ids),
+        )
     if self_repo_dir:
         prompt += SELF_IMPROVEMENT_SECTION.format(
             self_repo_dir=self_repo_dir,
