@@ -40,7 +40,7 @@ primary_region = "iad"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1024mb"
+  memory = "2048mb"
 
 [deploy]
   strategy = "immediate"

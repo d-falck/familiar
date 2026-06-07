@@ -317,7 +317,16 @@ async def _run() -> None:
     }
     history = History(history_path)
 
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+    # Process messages concurrently so you can fire several requests at once
+    # and they run in parallel (replies interleave). Bounded because each turn
+    # spawns its own model subprocess — too many at once would exhaust RAM.
+    max_concurrent = int(os.environ.get("MAX_CONCURRENT_UPDATES", "4"))
+    app = (
+        Application.builder()
+        .token(os.environ["TELEGRAM_BOT_TOKEN"])
+        .concurrent_updates(max_concurrent)
+        .build()
+    )
     app.bot_data["cfg"] = respond_cfg
     app.bot_data["history"] = history
     app.bot_data["debug_chat_id"] = os.environ.get("DEBUG_CHAT_ID")
