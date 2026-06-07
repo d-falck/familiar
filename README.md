@@ -25,7 +25,9 @@ Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent S
 | `CLAUDE_CODE_OAUTH_TOKEN` | either | long-lived Claude Max/Pro subscription token (`sk-ant-oat...`). Generate once with `claude setup-token` on any authed machine, paste the output. Takes precedence if both are set. No file or refresh management. |
 | `COMPOSIO_API_KEY` | yes | read by the `composio` SDK at startup |
 | `COMPOSIO_USER_ID` | yes | your Composio user id (e.g. `user_7svs9s`) — the bot creates a Tool Router session for this user at startup, which exposes all your connected toolkits |
-| `ANTHROPIC_MODEL` | no | default `claude-opus-4-6[1m]` |
+| `AGENT_BACKEND` | no | `claude` (default, Claude Agent SDK) or `codex` (OpenAI Codex CLI). Both share the same Composio MCP server and system prompt. |
+| `ANTHROPIC_MODEL` | no | default `claude-opus-4-8[1m]` (used when backend is `claude`) |
+| `CODEX_MODEL` | no | default `gpt-5.5` (used when backend is `codex`; reuses `OPENAI_API_KEY`) |
 | `HISTORY_DB_PATH` | no | default `./history.sqlite`; in Docker/Fly, `/data/history.sqlite` |
 | `MAX_AGENT_TURNS` | no | default `12` |
 

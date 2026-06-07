@@ -8,7 +8,9 @@ primary_region = "iad"
   HISTORY_DB_PATH = "/data/history.sqlite"
   MEMORY_PATH = "/data/memory.md"
   PERSONA_PATH = "prompts/assistant.md"
-  ANTHROPIC_MODEL = "claude-opus-4-6[1m]"
+  AGENT_BACKEND = "claude"
+  ANTHROPIC_MODEL = "claude-opus-4-8[1m]"
+  CODEX_MODEL = "gpt-5.5"
   MAX_AGENT_TURNS = "40"
   CLAUDE_ENABLE_STREAM_WATCHDOG = "1"
   MAX_MCP_OUTPUT_TOKENS = "25000"
@@ -16,6 +18,12 @@ primary_region = "iad"
   SCHEDULE_INTERVAL_SECONDS = "3600"
   TIMEZONE = "Europe/London"
   PORT = "8080"
+  # Self-improvement: a checkout of her own repo on the volume, plus the
+  # command she runs to deploy herself. Needs GITHUB_TOKEN + FLY_API_TOKEN
+  # secrets. Unset on flat-hunt-bot, so that bot can't self-modify.
+  SELF_REPO_DIR = "/data/familiar"
+  SELF_REPO_URL = "https://github.com/d-falck/familiar.git"
+  SELF_DEPLOY_CMD = "flyctl deploy -c fly.iris.toml -a iris-familiar --ha=false"
 
 [http_service]
   internal_port = 8080

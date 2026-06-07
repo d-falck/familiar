@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,7 @@ from telegram import MessageEntity, ReactionTypeEmoji, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from claude_client import respond
+from agent import respond
 from history import History
 from silence import SILENCE_INSTRUCTION, is_silent
 from voice import transcribe as transcribe_voice
@@ -252,8 +253,38 @@ async def _run_scheduler(
             log.exception("scheduled check-in failed")
 
 
+def _bootstrap_self_repo() -> str | None:
+    """Ensure a git checkout of our own source exists on the persistent
+    volume so the agent can read, edit, push and redeploy itself.
+
+    Returns the checkout path, or None if self-improvement is disabled
+    (SELF_REPO_DIR unset). The GitHub token is baked into the remote URL
+    (single-tenant personal bot) and refreshed each boot so rotations take
+    effect. Survives restarts via the /data volume.
+    """
+    repo_dir = os.environ.get("SELF_REPO_DIR")
+    if not repo_dir:
+        return None
+    repo_url = os.environ["SELF_REPO_URL"]
+    token = os.environ.get("GITHUB_TOKEN", "")
+    auth_url = (
+        repo_url.replace("https://", f"https://x-access-token:{token}@")
+        if token
+        else repo_url
+    )
+    if not Path(repo_dir, ".git").exists():
+        subprocess.run(["git", "clone", auth_url, repo_dir], check=True)
+    subprocess.run(["git", "-C", repo_dir, "remote", "set-url", "origin", auth_url], check=True)
+    subprocess.run(["git", "-C", repo_dir, "config", "user.name", "Iris"], check=True)
+    subprocess.run(["git", "-C", repo_dir, "config", "user.email", "iris@familiar.bot"], check=True)
+    log.info("self-repo ready at %s", repo_dir)
+    return repo_dir
+
+
 async def _run() -> None:
     load_dotenv()
+
+    self_repo_dir = _bootstrap_self_repo()
 
     session = Composio().create(user_id=os.environ["COMPOSIO_USER_ID"])
     mcp_servers = {
@@ -264,14 +295,25 @@ async def _run() -> None:
         }
     }
 
+    backend = os.environ.get("AGENT_BACKEND", "claude").lower()
+    model = (
+        os.environ.get("CODEX_MODEL", "gpt-5.5")
+        if backend == "codex"
+        else os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8[1m]")
+    )
+    log.info("agent backend=%s model=%s", backend, model)
+
     history_path = os.environ.get("HISTORY_DB_PATH", "./history.sqlite")
     respond_cfg = {
+        "backend": backend,
         "mcp_servers": mcp_servers,
-        "model": os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6[1m]"),
+        "model": model,
         "max_turns": int(os.environ.get("MAX_AGENT_TURNS", "40")),
         "memory_path": os.environ.get("MEMORY_PATH", "./memory.md"),
         "persona_path": os.environ.get("PERSONA_PATH", "prompts/flat_hunt.md"),
         "history_path": history_path,
+        "self_repo_dir": self_repo_dir,
+        "self_deploy_cmd": os.environ.get("SELF_DEPLOY_CMD"),
     }
     history = History(history_path)
 

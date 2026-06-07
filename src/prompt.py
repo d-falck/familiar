@@ -1,21 +1,17 @@
-"""Claude Agent SDK wrapper.
+"""Shared system-prompt construction, backend-agnostic.
 
-Passes a per-chat group-chat transcript to Claude via `query()`, with a
-caller-supplied `mcp_servers` dict attached. The SDK handles the tool-call
-loop and returns a final text via ResultMessage.
+Both the Claude and Codex backends render the same persona + memory +
+cross-chat + self-improvement instructions; only how they *consume* the
+resulting string differs (Claude passes it as a system prompt, Codex
+prepends it to the turn input).
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-IDLE_TIMEOUT_SECONDS = 90
 
-
-def _load_memory(path: str) -> str:
+def load_memory(path: str) -> str:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     if not p.exists():
@@ -23,27 +19,9 @@ def _load_memory(path: str) -> str:
     return p.read_text()
 
 
-def _load_persona(path: str) -> str:
+def load_persona(path: str) -> str:
     return Path(path).read_text().strip()
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    PermissionResultAllow,
-    ResultMessage,
-    TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-)
-
-log = logging.getLogger(__name__)
-
-
-async def _allow_all(*_args, **_kwargs) -> PermissionResultAllow:
-    return PermissionResultAllow()
 
 SYSTEM_PROMPT_TEMPLATE = """\
 {persona}
@@ -72,8 +50,8 @@ If memory already tells you *how* to do something (a tool slug that \
 reliably works, a specific workflow, a user's preferred tone), USE IT \
 DIRECTLY instead of re-discovering or re-deciding.
 
-Update memory immediately (Edit tool or `bash` with a heredoc) when you \
-learn or decide something worth persisting. Examples of useful entries \
+Update memory immediately (Edit/write tools or `bash` with a heredoc) when \
+you learn or decide something worth persisting. Examples of useful entries \
 (not an exhaustive list):
 
 - Tool/workflow knowledge you figured out the hard way.
@@ -128,7 +106,7 @@ wired up project-wide in Composio).
 Always `list_active()` before creating to avoid duplicates. Record every \
 trigger id + purpose in memory under "Active triggers" so cleanup is \
 possible later. Confirm with the user before creating — triggers cost a \
-Claude run per event, so use tight filters.
+model run per event, so use tight filters.
 
 ## Web scraping
 
@@ -148,83 +126,54 @@ fetching.
 find what you need, move on with what you have.
 """
 
+# Appended only when a self-improvement checkout is configured.
+SELF_IMPROVEMENT_SECTION = """\
 
-async def respond(
-    messages: list[dict],
-    *,
-    mcp_servers: dict,
-    model: str,
-    memory_path: str,
-    persona_path: str,
-    history_path: str,
-    max_turns: int = 12,
-    on_tool_use: Callable[[str, dict], Awaitable[None]] | None = None,
-    on_text: Callable[[str], Awaitable[None]] | None = None,
-    on_thinking: Callable[[str], Awaitable[None]] | None = None,
-    on_tool_result: Callable[[str, str], Awaitable[None]] | None = None,
-) -> str:
-    transcript_body = "\n".join(
+## Self-improvement
+
+The code in `{self_repo_dir}` is YOUR OWN source — a git checkout of your \
+repository on your persistent volume, already cloned with push credentials \
+and git identity configured. You can read and rewrite yourself, then deploy \
+to become a better version.
+
+Workflow (run `cd {self_repo_dir}` first):
+- Edit files with your normal tools. Read the code before changing it.
+- `git commit` then `git push` — the running container is ephemeral; only \
+pushed commits and this volume survive.
+- Deploy with: `{self_deploy_cmd}`. This rebuilds and replaces your running \
+machine — you go briefly offline and restart on the new code mid-deploy, so \
+send any reply to the user BEFORE deploying.
+- A broken deploy can crash-loop you; Damon then has to recover from his \
+laptop. Sanity-check changes first, keep them small, and deploy only when \
+asked or clearly warranted.
+- After deploying, tell Damon exactly what you changed and why."""
+
+
+def render_transcript(messages: list[dict]) -> str:
+    body = "\n".join(
         f"assistant: {m['content']}" if m["role"] == "assistant" else m["content"]
         for m in messages
     )
-    transcript = f"<transcript>\n{transcript_body}\n</transcript>"
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        persona=_load_persona(persona_path),
+    return f"<transcript>\n{body}\n</transcript>"
+
+
+def build_system_prompt(
+    *,
+    persona_path: str,
+    memory_path: str,
+    history_path: str,
+    self_repo_dir: str | None = None,
+    self_deploy_cmd: str | None = None,
+) -> str:
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        persona=load_persona(persona_path),
         memory_path=memory_path,
-        memory_content=_load_memory(memory_path),
+        memory_content=load_memory(memory_path),
         history_path=history_path,
     )
-    options = ClaudeAgentOptions(
-        system_prompt=system_prompt,
-        model=model,
-        mcp_servers=mcp_servers,
-        allowed_tools=["mcp__composio__*", "WebFetch", "WebSearch", "Bash"],
-        can_use_tool=_allow_all,
-        setting_sources=[],
-        max_turns=max_turns,
-        stderr=lambda line: log.error("claude stderr: %s", line),
-    )
-
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(transcript)
-        stream = client.receive_response().__aiter__()
-        while True:
-            try:
-                msg = await asyncio.wait_for(
-                    stream.__anext__(), timeout=IDLE_TIMEOUT_SECONDS
-                )
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"claude produced no output for {IDLE_TIMEOUT_SECONDS}s — aborting"
-                )
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        log.info("[claude text] %s", block.text)
-                        if on_text:
-                            await on_text(block.text)
-                    elif isinstance(block, ThinkingBlock):
-                        log.info("[claude thinking] %s", block.thinking)
-                        if on_thinking:
-                            await on_thinking(block.thinking)
-                    elif isinstance(block, ToolUseBlock):
-                        log.info("[claude tool_use] %s input=%s", block.name, block.input)
-                        if on_tool_use:
-                            await on_tool_use(block.name, dict(block.input or {}))
-            elif isinstance(msg, UserMessage):
-                for block in msg.content if isinstance(msg.content, list) else []:
-                    if isinstance(block, ToolResultBlock):
-                        content_str = str(block.content)
-                        log.info("[claude tool_result] %s: %s", block.tool_use_id, content_str[:500])
-                        if on_tool_result:
-                            await on_tool_result(block.tool_use_id, content_str)
-            elif isinstance(msg, ResultMessage):
-                log.info(
-                    "[claude result] num_turns=%s stop_reason=%s text=%s",
-                    msg.num_turns,
-                    msg.stop_reason,
-                    (msg.result or "")[:500],
-                )
-                return msg.result or "(no response)"
+    if self_repo_dir:
+        prompt += SELF_IMPROVEMENT_SECTION.format(
+            self_repo_dir=self_repo_dir,
+            self_deploy_cmd=self_deploy_cmd or "(deploy command not configured)",
+        )
+    return prompt
