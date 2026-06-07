@@ -1,0 +1,43 @@
+{
+  "name": "Iris",
+  "agent_id_env": "ELEVENLABS_IRIS_AGENT_ID",
+  "prompt_file": "prompts/iris_voice.md",
+  "version_description": "Provisioned from familiar codebase",
+  "tags": ["iris", "familiar", "code-provisioned"],
+  "conversation_config": {
+    "agent": {
+      "first_message": "Hey, it's Iris. What do you need?",
+      "language": "en",
+      "disable_first_message_interruptions": false,
+      "prompt": {
+        "temperature": 0.4
+      }
+    },
+    "turn": {
+      "turn_timeout": 7,
+      "silence_end_call_timeout": -1,
+      "turn_eagerness": "normal"
+    }
+  },
+  "tools": [
+    {
+      "name": "dispatch_task",
+      "description": "Send a longer or multi-step task to Iris in Telegram. Use this when Damon asks for something that should happen asynchronously while the voice conversation continues.",
+      "url_env": "IRIS_VOICE_DISPATCH_URL",
+      "secret_env": "VOICE_DISPATCH_SECRET",
+      "secret_header": "x-dispatch-secret",
+      "response_timeout_secs": 3,
+      "expects_response": false,
+      "parameters": {
+        "type": "object",
+        "required": ["instruction"],
+        "properties": {
+          "instruction": {
+            "type": "string",
+            "description": "A concise one-paragraph task instruction in Damon's voice, including any relevant context from the call."
+          }
+        }
+      }
+    }
+  ]
+}

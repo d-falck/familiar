@@ -39,6 +39,40 @@ uv sync
 uv run python bot.py
 ```
 
+## ElevenLabs Iris provisioning
+
+The voice-call agent is provisioned from repo-owned config:
+
+- `prompts/iris_voice.md` — voice-specific Iris behaviour.
+- `config/elevenlabs/iris.json` — agent fields and Iris-owned webhook tools.
+- `scripts/provision_elevenlabs.py` — dry-run/apply sync script.
+
+Required env vars:
+
+```bash
+export ELEVENLABS_API_KEY=...
+export ELEVENLABS_IRIS_AGENT_ID=...
+export IRIS_VOICE_DISPATCH_URL=https://iris-familiar.fly.dev/voice/dispatch
+export VOICE_DISPATCH_SECRET=...
+```
+
+Preview the patch:
+
+```bash
+uv run python scripts/provision_elevenlabs.py
+```
+
+Apply it:
+
+```bash
+uv run python scripts/provision_elevenlabs.py --apply
+```
+
+The sync reads the live agent first, upserts only Iris-owned tools by name
+(`dispatch_task`), and patches only configured agent fields. It preserves
+unknown workflow/platform settings so dashboard-only settings are not
+clobbered accidentally.
+
 The Claude Agent SDK spawns the `claude` CLI as a subprocess, so you need Claude Code installed locally:
 
 ```bash
