@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "elevenlabs:init": "elevenlabs agents init",
+    "elevenlabs:login": "elevenlabs auth login",
+    "elevenlabs:pull": "elevenlabs agents pull",
+    "elevenlabs:pull:update": "elevenlabs agents pull --update",
+    "elevenlabs:push:dry-run": "elevenlabs agents push --dry-run",
+    "elevenlabs:push": "elevenlabs agents push",
+    "elevenlabs:status": "elevenlabs agents status"
+  },
+  "private": true
+}

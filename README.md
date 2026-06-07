@@ -39,39 +39,52 @@ uv sync
 uv run python bot.py
 ```
 
-## ElevenLabs Iris provisioning
+## ElevenLabs Iris agent-as-code
 
-The voice-call agent is provisioned from repo-owned config:
+The voice-call Iris agent should be managed with ElevenLabs' official CLI
+agent-as-code workflow, not a custom REST sync script.
 
-- `prompts/iris_voice.md` — voice-specific Iris behaviour.
-- `config/elevenlabs/iris.json` — agent fields and Iris-owned webhook tools.
-- `scripts/provision_elevenlabs.py` — dry-run/apply sync script.
-
-Required env vars:
+Install and authenticate the CLI:
 
 ```bash
-export ELEVENLABS_API_KEY=...
-export ELEVENLABS_IRIS_AGENT_ID=...
-export IRIS_VOICE_DISPATCH_URL=https://iris-familiar.fly.dev/voice/dispatch
-export VOICE_DISPATCH_SECRET=...
+npm install -g @elevenlabs/cli
+npm run elevenlabs:login
 ```
 
-Preview the patch:
+The first import must be read-only from the live ElevenLabs agent:
 
 ```bash
-uv run python scripts/provision_elevenlabs.py
+npm run elevenlabs:init
+npm run elevenlabs:pull
 ```
 
-Apply it:
+That creates the official repo-managed structure:
+
+- `agents.json` — central agent registry.
+- `tools.json` — tool registry.
+- `tests.json` — test registry.
+- `agent_configs/` — per-agent JSON configs.
+- `tool_configs/` — per-tool JSON configs.
+- `test_configs/` — per-test JSON configs.
+
+After pulling, inspect and commit the generated baseline before making edits.
+Do not run a push against an unreviewed or hand-recreated config.
+
+For future changes:
 
 ```bash
-uv run python scripts/provision_elevenlabs.py --apply
+npm run elevenlabs:pull:update      # refresh local config from dashboard/API changes
+git diff                           # inspect what changed
+npm run elevenlabs:push:dry-run     # preview platform changes
+npm run elevenlabs:push             # apply after review
 ```
 
-The sync reads the live agent first, upserts only Iris-owned tools by name
-(`dispatch_task`), and patches only configured agent fields. It preserves
-unknown workflow/platform settings so dashboard-only settings are not
-clobbered accidentally.
+The voice dispatch endpoint used by Iris-owned webhook tools is:
+
+```bash
+IRIS_VOICE_DISPATCH_URL=https://iris-familiar.fly.dev/voice/dispatch
+VOICE_DISPATCH_SECRET=...
+```
 
 The Claude Agent SDK spawns the `claude` CLI as a subprocess, so you need Claude Code installed locally:
 
