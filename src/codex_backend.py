@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -34,10 +35,12 @@ def _write_codex_home(mcp_servers: dict) -> str:
     """Write a throwaway CODEX_HOME/config.toml wiring up the MCP servers as
     remote streamable-HTTP servers with their auth headers. Returns the dir.
     """
-    home = tempfile.mkdtemp(prefix="codex-home-")
-    # Force API-key auth: the container has no ChatGPT login (auth.json), so
-    # Codex must use OPENAI_API_KEY from the env.
-    lines: list[str] = ['preferred_auth_method = "apikey"', ""]
+    # Codex refuses to create its helper binaries under a temp dir, so keep
+    # CODEX_HOME on a real volume (CODEX_HOME_BASE=/data in prod).
+    base = os.environ.get("CODEX_HOME_BASE") or tempfile.gettempdir()
+    Path(base).mkdir(parents=True, exist_ok=True)
+    home = tempfile.mkdtemp(prefix="codex-home-", dir=base)
+    lines: list[str] = []
     for name, spec in mcp_servers.items():
         url = spec.get("url")
         if not url:
@@ -97,6 +100,25 @@ async def run(
     final_file = Path(codex_home, "final.txt")
     full_prompt = f"{system_prompt}\n\n{render_transcript(messages)}"
 
+    # `codex exec` reads CODEX_API_KEY (its exec-only inline auth var) for
+    # headless API-key auth; plain OPENAI_API_KEY is not picked up here.
+    env = {**os.environ, "CODEX_HOME": codex_home}
+    if os.environ.get("OPENAI_API_KEY"):
+        env["CODEX_API_KEY"] = os.environ["OPENAI_API_KEY"]
+
+    try:
+        return await _run_proc(
+            full_prompt, model, final_file, workdir, env,
+            on_tool_use=on_tool_use, on_text=on_text, on_thinking=on_thinking,
+        )
+    finally:
+        shutil.rmtree(codex_home, ignore_errors=True)
+
+
+async def _run_proc(
+    full_prompt, model, final_file, workdir, env,
+    *, on_tool_use, on_text, on_thinking,
+) -> str:
     proc = await asyncio.create_subprocess_exec(
         "codex", "exec", "--json", "--yolo",
         "-m", model,
@@ -106,7 +128,7 @@ async def run(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "CODEX_HOME": codex_home},
+        env=env,
     )
     proc.stdin.write(full_prompt.encode())
     await proc.stdin.drain()

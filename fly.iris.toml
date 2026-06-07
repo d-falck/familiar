@@ -11,6 +11,8 @@ primary_region = "iad"
   AGENT_BACKEND = "codex"
   ANTHROPIC_MODEL = "claude-opus-4-8[1m]"
   CODEX_MODEL = "gpt-5.5"
+  # Codex won't create helper binaries under /tmp, so keep its home on the volume.
+  CODEX_HOME_BASE = "/data"
   MAX_AGENT_TURNS = "40"
   CLAUDE_ENABLE_STREAM_WATCHDOG = "1"
   MAX_MCP_OUTPUT_TOKENS = "25000"
