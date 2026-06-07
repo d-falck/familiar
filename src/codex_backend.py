@@ -35,7 +35,9 @@ def _write_codex_home(mcp_servers: dict) -> str:
     remote streamable-HTTP servers with their auth headers. Returns the dir.
     """
     home = tempfile.mkdtemp(prefix="codex-home-")
-    lines: list[str] = []
+    # Force API-key auth: the container has no ChatGPT login (auth.json), so
+    # Codex must use OPENAI_API_KEY from the env.
+    lines: list[str] = ['preferred_auth_method = "apikey"', ""]
     for name, spec in mcp_servers.items():
         url = spec.get("url")
         if not url:
