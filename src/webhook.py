@@ -25,6 +25,7 @@ from aiohttp import web
 
 from prompt import build_voice_prompt, load_memory, render_recent_context
 from silence import SILENCE_INSTRUCTION, is_silent
+from telegram_md import send_markdown
 
 log = logging.getLogger("webhook")
 
@@ -160,7 +161,12 @@ def build_app(
             # but as a single terse assistant row (not the original event).
             history.add_assistant(target_chat_id, reply)
             try:
-                await telegram_bot.send_message(chat_id=target_chat_id, text=reply[:4000])
+                await send_markdown(
+                    lambda body, pm: telegram_bot.send_message(
+                        chat_id=target_chat_id, text=body, parse_mode=pm
+                    ),
+                    reply,
+                )
             except Exception:
                 log.exception("failed to post trigger reply to telegram")
         else:
@@ -204,7 +210,12 @@ def build_app(
         if not is_silent(reply):
             history.add_assistant(target_chat_id, reply)
             try:
-                await telegram_bot.send_message(chat_id=target_chat_id, text=reply[:4000])
+                await send_markdown(
+                    lambda body, pm: telegram_bot.send_message(
+                        chat_id=target_chat_id, text=body, parse_mode=pm
+                    ),
+                    reply,
+                )
             except Exception:
                 log.exception("failed to post voice dispatch reply to telegram")
 

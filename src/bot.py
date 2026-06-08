@@ -11,18 +11,16 @@ from collections import deque
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import telegramify_markdown
 from aiohttp import web
 from composio import Composio
 from dotenv import load_dotenv
 from telegram import MessageEntity, ReactionTypeEmoji, Update
-from telegram.constants import ParseMode
-from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agent import respond
 from history import History
 from silence import SILENCE_INSTRUCTION, is_silent
+from telegram_md import send_markdown
 from voice import transcribe as transcribe_voice
 from webhook import build_app as build_webhook_app
 
@@ -55,37 +53,6 @@ def _describe_tool_input(tool_input: dict) -> str:
     if tool_input:
         return str(next(iter(tool_input.values())))
     return ""
-
-
-async def _send_markdown(send, text: str) -> None:
-    """Deliver ``text`` to Telegram as MarkdownV2, falling back to plain text
-    if the converted markup is rejected. MarkdownV2 is finicky — one stray
-    entity makes Telegram reject the whole message — so a bad conversion must
-    never mean a missing or raw-looking message. ``send`` is a callable
-    ``(body, parse_mode_or_None) -> awaitable`` (lets the same logic serve both
-    send_message and reply_text). The raw text is truncated *before*
-    markdownify so we never slice through an escape and corrupt the markup.
-    """
-    raw = text[:3900]
-    md = None
-    try:
-        # telegramify renders unordered lists with a ⦁ (Z-NOTATION SPOT) glyph
-        # that looks broken in Telegram; swap it for a clean bullet.
-        md = telegramify_markdown.markdownify(raw).replace("⦁", "•")[:4096]
-    except Exception:
-        log.exception("markdownify failed; sending plain text")
-    if md:
-        try:
-            await send(md, ParseMode.MARKDOWN_V2)
-            return
-        except BadRequest as exc:
-            log.warning("MarkdownV2 rejected (%s); retrying as plain text", exc)
-        except Exception:
-            log.exception("markdown send failed; retrying as plain text")
-    try:
-        await send(raw, None)
-    except Exception:
-        log.exception("plain-text send failed")
 
 
 REACTION_RECEIVED = "👀"
@@ -287,7 +254,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     last_streamed_text = {"value": None}
 
     async def send_to_main(text: str) -> None:
-        await _send_markdown(
+        await send_markdown(
             lambda body, pm: context.bot.send_message(
                 chat_id=chat.id,
                 message_thread_id=thread_id or None,
@@ -326,18 +293,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             await asyncio.sleep(4)
 
-    # Serialize turns within this session (chat + topic) so a follow-up waits
-    # for the prior turn and continues the right context; different sessions
-    # still run in parallel. The transcript is loaded inside the lock so it
-    # reflects any turn that completed while this message was queued.
-    lock = _session_lock(context.application.bot_data, chat.id, thread_id)
-    async with lock:
+    bot_data = context.application.bot_data
+
+    async def run_turn() -> None:
         typing = asyncio.create_task(keep_typing())
         error = None
         try:
             messages = _load_session_context(
                 history,
-                main_dm_chat_id=context.application.bot_data["main_dm_chat_id"],
+                main_dm_chat_id=bot_data["main_dm_chat_id"],
                 chat_id=chat.id,
                 thread_id=thread_id,
                 workspace_chat_ids=workspace_chat_ids,
@@ -350,6 +314,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 on_tool_result=on_tool_result,
                 **cfg,
             )
+        except asyncio.CancelledError:
+            # Superseded by a newer message in this session (interrupt-on-send).
+            # Abandon quietly: no reply, no assistant row, not marked handled —
+            # nothing is lost, the newer turn already has this message in its
+            # transcript. typing is stopped by the finally below.
+            log.info("turn superseded chat=%s thread=%s", chat.id, thread_id)
+            raise
         except Exception as exc:
             log.exception("respond failed")
             error = exc
@@ -363,14 +334,46 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # If the final reply is identical to the last text block we already
         # streamed, skip it — no point duplicating the message.
         if error or reply != last_streamed_text["value"]:
-            await _send_markdown(
+            await send_markdown(
                 lambda body, pm: message.reply_text(body, parse_mode=pm),
                 reply,
             )
         # Mark fully handled only now (turn done + reply sent) so a redelivery
         # after a restart can't fire a duplicate, while an interrupted turn
         # (which never reaches here) still re-runs and isn't lost.
-        _mark_handled(context.application.bot_data, update.update_id)
+        _mark_handled(bot_data, update.update_id)
+
+    key = (chat.id, thread_id)
+    if bot_data.get("interrupt_on_send", True):
+        # Interrupt-on-send: a new message in this session cancels the in-flight
+        # turn and starts a fresh one, which reloads the transcript (now holding
+        # BOTH the interrupted message and this one) and re-plans against the
+        # latest input. The swap (cancel prior + register new) is done under a
+        # short-held per-session lock so two near-simultaneous messages can't
+        # both start a turn; the turn itself runs OUTSIDE that lock. Different
+        # sessions (other topics / the DM) are unaffected and run in parallel.
+        running: dict = bot_data["running_turns"]
+        swap_lock = _session_lock(bot_data, chat.id, thread_id)
+        async with swap_lock:
+            prev = running.get(key)
+            if prev is not None and not prev.done():
+                log.info("interrupting in-flight turn chat=%s thread=%s", chat.id, thread_id)
+                prev.cancel()
+            task = asyncio.create_task(run_turn())
+            running[key] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            # This turn was itself superseded by a later message — fine.
+            pass
+        finally:
+            if running.get(key) is task:
+                running.pop(key, None)
+    else:
+        # Legacy: serialize turns within a session — a follow-up waits for the
+        # prior turn rather than interrupting it.
+        async with _session_lock(bot_data, chat.id, thread_id):
+            await run_turn()
 
 
 def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
@@ -425,7 +428,12 @@ async def _run_scheduler(
             reply = await respond(messages, **respond_cfg)
             if not is_silent(reply):
                 history.add_assistant(chat_id, reply)
-                await telegram_bot.send_message(chat_id=chat_id, text=reply[:4000])
+                await send_markdown(
+                    lambda body, pm: telegram_bot.send_message(
+                        chat_id=chat_id, text=body, parse_mode=pm
+                    ),
+                    reply,
+                )
         except Exception:
             log.exception("scheduled check-in failed")
 
@@ -530,6 +538,14 @@ async def _run() -> None:
     )
     app.bot_data["workspace_chat_ids"] = workspace_chat_ids
     app.bot_data["session_locks"] = {}
+    # Interrupt-on-send: a new message in a session cancels its in-flight turn
+    # and restarts with the updated transcript, instead of queuing behind it.
+    # running_turns maps (chat_id, thread_id) -> the live turn's asyncio Task.
+    # Set INTERRUPT_ON_SEND=false to fall back to serialized (queued) turns.
+    app.bot_data["running_turns"] = {}
+    app.bot_data["interrupt_on_send"] = (
+        os.environ.get("INTERRUPT_ON_SEND", "true").lower() == "true"
+    )
     # Dedup of already-handled Telegram updates (see on_message). seen_* is the
     # in-process guard against concurrent re-delivery; handled_* is persisted to
     # the data volume so a restart/deploy can't re-answer an already-completed
