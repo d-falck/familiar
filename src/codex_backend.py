@@ -24,7 +24,9 @@ from prompt import render_transcript
 
 log = logging.getLogger(__name__)
 
-IDLE_TIMEOUT_SECONDS = 120
+# See claude_backend for rationale: must clear the longest legitimate silent
+# gap (a single multi-minute tool call), not just normal token latency.
+IDLE_TIMEOUT_SECONDS = int(os.environ.get("AGENT_IDLE_TIMEOUT_SECONDS", "300"))
 
 
 def _toml_str(value: str) -> str:

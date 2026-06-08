@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable
 
 from claude_agent_sdk import (
@@ -28,7 +29,14 @@ from prompt import render_transcript
 
 log = logging.getLogger(__name__)
 
-IDLE_TIMEOUT_SECONDS = 90
+# Watchdog: abort a turn only after this long with NO stream activity at all.
+# It must clear the longest *legitimate* silent gap. Partial messages (enabled
+# below) keep it fed through long reasoning, so this only needs to cover a
+# single long tool call that emits nothing until it returns — a multi-minute
+# `flyctl deploy`, browser automation, or deep web research. 90s killed those
+# healthy turns ("produced no output for 90s — aborting"); 300s does not, while
+# still reaping a genuinely stuck subprocess. Override via env if needed.
+IDLE_TIMEOUT_SECONDS = int(os.environ.get("AGENT_IDLE_TIMEOUT_SECONDS", "300"))
 
 
 async def _allow_all(*_args, **_kwargs) -> PermissionResultAllow:
@@ -59,6 +67,12 @@ async def run(
         # `adaptive` + a top-level `effort` knob.
         thinking={"type": "adaptive"},
         effort="xhigh",
+        # Drip StreamEvent heartbeats during long reasoning/generation so the
+        # idle watchdog isn't tripped mid-thought (xhigh effort can spend
+        # minutes on a single block before it's delivered as a complete
+        # message). StreamEvents aren't AssistantMessages, so the receive loop
+        # below ignores them as pure heartbeats — no duplicate streamed text.
+        include_partial_messages=True,
         stderr=lambda line: log.error("claude stderr: %s", line),
     )
 
