@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import subprocess
+from collections import deque
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,7 @@ from composio import Composio
 from dotenv import load_dotenv
 from telegram import MessageEntity, ReactionTypeEmoji, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agent import respond
@@ -52,6 +54,37 @@ def _describe_tool_input(tool_input: dict) -> str:
     if tool_input:
         return str(next(iter(tool_input.values())))
     return ""
+
+
+async def _send_markdown(send, text: str) -> None:
+    """Deliver ``text`` to Telegram as MarkdownV2, falling back to plain text
+    if the converted markup is rejected. MarkdownV2 is finicky — one stray
+    entity makes Telegram reject the whole message — so a bad conversion must
+    never mean a missing or raw-looking message. ``send`` is a callable
+    ``(body, parse_mode_or_None) -> awaitable`` (lets the same logic serve both
+    send_message and reply_text). The raw text is truncated *before*
+    markdownify so we never slice through an escape and corrupt the markup.
+    """
+    raw = text[:3900]
+    md = None
+    try:
+        # telegramify renders unordered lists with a ⦁ (Z-NOTATION SPOT) glyph
+        # that looks broken in Telegram; swap it for a clean bullet.
+        md = telegramify_markdown.markdownify(raw).replace("⦁", "•")[:4096]
+    except Exception:
+        log.exception("markdownify failed; sending plain text")
+    if md:
+        try:
+            await send(md, ParseMode.MARKDOWN_V2)
+            return
+        except BadRequest as exc:
+            log.warning("MarkdownV2 rejected (%s); retrying as plain text", exc)
+        except Exception:
+            log.exception("markdown send failed; retrying as plain text")
+    try:
+        await send(raw, None)
+    except Exception:
+        log.exception("plain-text send failed")
 
 
 REACTION_RECEIVED = "👀"
@@ -102,6 +135,21 @@ def _load_session_context(
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Drop duplicate deliveries of the same update. Telegram can re-deliver an
+    # update (network retries; a restart before the poll offset is acked), and
+    # since updates are handled concurrently a redelivery would otherwise run a
+    # second full turn — producing two complete replies to one message. The
+    # check + add are await-free, so concurrent handlers can't interleave here.
+    seen_ids: set = context.application.bot_data["seen_update_ids"]
+    if update.update_id in seen_ids:
+        log.info("duplicate update_id=%s dropped", update.update_id)
+        return
+    seen_order: deque = context.application.bot_data["seen_update_order"]
+    seen_ids.add(update.update_id)
+    seen_order.append(update.update_id)
+    if len(seen_order) > 2000:
+        seen_ids.discard(seen_order.popleft())
+
     message = update.effective_message
     chat = update.effective_chat
     text = message.text or message.caption or ""
@@ -203,15 +251,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     last_streamed_text = {"value": None}
 
     async def send_to_main(text: str) -> None:
-        try:
-            await context.bot.send_message(
+        await _send_markdown(
+            lambda body, pm: context.bot.send_message(
                 chat_id=chat.id,
                 message_thread_id=thread_id or None,
-                text=telegramify_markdown.markdownify(text)[:4000],
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
-        except Exception:
-            log.exception("failed to send main-chat message")
+                text=body,
+                parse_mode=pm,
+            ),
+            text,
+        )
 
     async def on_tool_use(tool_name: str, tool_input: dict) -> None:
         await set_reaction(REACTION_WORKING)
@@ -279,9 +327,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # If the final reply is identical to the last text block we already
         # streamed, skip it — no point duplicating the message.
         if error or reply != last_streamed_text["value"]:
-            await message.reply_text(
-                telegramify_markdown.markdownify(reply)[:4000],
-                parse_mode=ParseMode.MARKDOWN_V2,
+            await _send_markdown(
+                lambda body, pm: message.reply_text(body, parse_mode=pm),
+                reply,
             )
 
 
@@ -431,11 +479,20 @@ async def _run() -> None:
     app.bot_data["attachments_dir"] = Path(
         os.environ.get("ATTACHMENTS_DIR", "./attachments")
     )
+    # Off by default: streaming every intermediate text block to the main chat
+    # turns one multi-step turn into several messages that read like duplicate
+    # or contradicting answers. Reactions already signal progress; the main chat
+    # now gets exactly one message per turn (the final reply), while intermediate
+    # text still goes to the debug feed. Set STREAM_INTERMEDIATE_TEXT=true to
+    # restore live streaming.
     app.bot_data["stream_intermediate_text"] = (
-        os.environ.get("STREAM_INTERMEDIATE_TEXT", "true").lower() != "false"
+        os.environ.get("STREAM_INTERMEDIATE_TEXT", "false").lower() == "true"
     )
     app.bot_data["workspace_chat_ids"] = workspace_chat_ids
     app.bot_data["session_locks"] = {}
+    # Dedup of already-handled Telegram updates (see on_message).
+    app.bot_data["seen_update_ids"] = set()
+    app.bot_data["seen_update_order"] = deque()
     app.bot_data["main_dm_chat_id"] = (
         int(os.environ["MAIN_DM_CHAT_ID"]) if os.environ.get("MAIN_DM_CHAT_ID") else None
     )
