@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -97,6 +98,40 @@ _DM_CONTEXT_SEP = (
     "topic. This topic's own conversation follows.]"
 )
 
+# How many recently-completed update ids to remember (in memory and on disk).
+_HANDLED_CAP = 2000
+
+
+def _load_handled(path: Path) -> tuple[set[int], deque]:
+    """Load the persisted set of fully-handled Telegram update ids. Survives
+    restarts so a deploy (which wipes the in-memory dedup) can't cause Telegram
+    to re-deliver an already-answered update and fire a duplicate reply. Best
+    effort: a missing/corrupt file just yields an empty set."""
+    try:
+        ids = [int(x) for x in json.loads(path.read_text())]
+        return set(ids), deque(ids)
+    except Exception:
+        return set(), deque()
+
+
+def _mark_handled(bot_data: dict, update_id: int) -> None:
+    """Record an update as fully handled (turn ran AND reply was sent), in
+    memory and on disk. Called only at the end of a turn, so an interrupted
+    turn (e.g. killed by a deploy restart) is NOT marked — it re-runs on
+    redelivery and the reply isn't lost. Persistence is best-effort."""
+    ids: set[int] = bot_data["handled_update_ids"]
+    order: deque = bot_data["handled_update_order"]
+    if update_id in ids:
+        return
+    ids.add(update_id)
+    order.append(update_id)
+    while len(order) > _HANDLED_CAP:
+        ids.discard(order.popleft())
+    try:
+        bot_data["handled_updates_path"].write_text(json.dumps(list(order)))
+    except Exception:
+        log.exception("failed to persist handled update ids")
+
 
 def _session_lock(bot_data: dict, chat_id: int, thread_id: int) -> asyncio.Lock:
     """One lock per (chat, topic) session: turns within a session are
@@ -141,7 +176,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # second full turn — producing two complete replies to one message. The
     # check + add are await-free, so concurrent handlers can't interleave here.
     seen_ids: set = context.application.bot_data["seen_update_ids"]
-    if update.update_id in seen_ids:
+    handled_ids: set = context.application.bot_data["handled_update_ids"]
+    if update.update_id in seen_ids or update.update_id in handled_ids:
         log.info("duplicate update_id=%s dropped", update.update_id)
         return
     seen_order: deque = context.application.bot_data["seen_update_order"]
@@ -331,6 +367,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 lambda body, pm: message.reply_text(body, parse_mode=pm),
                 reply,
             )
+        # Mark fully handled only now (turn done + reply sent) so a redelivery
+        # after a restart can't fire a duplicate, while an interrupted turn
+        # (which never reaches here) still re-runs and isn't lost.
+        _mark_handled(context.application.bot_data, update.update_id)
 
 
 def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
@@ -490,9 +530,17 @@ async def _run() -> None:
     )
     app.bot_data["workspace_chat_ids"] = workspace_chat_ids
     app.bot_data["session_locks"] = {}
-    # Dedup of already-handled Telegram updates (see on_message).
+    # Dedup of already-handled Telegram updates (see on_message). seen_* is the
+    # in-process guard against concurrent re-delivery; handled_* is persisted to
+    # the data volume so a restart/deploy can't re-answer an already-completed
+    # update (the cause of duplicate/late replies around deploys).
     app.bot_data["seen_update_ids"] = set()
     app.bot_data["seen_update_order"] = deque()
+    handled_path = Path(history_path).with_name("handled_updates.json")
+    handled_ids, handled_order = _load_handled(handled_path)
+    app.bot_data["handled_updates_path"] = handled_path
+    app.bot_data["handled_update_ids"] = handled_ids
+    app.bot_data["handled_update_order"] = handled_order
     app.bot_data["main_dm_chat_id"] = (
         int(os.environ["MAIN_DM_CHAT_ID"]) if os.environ.get("MAIN_DM_CHAT_ID") else None
     )
