@@ -17,11 +17,13 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from datetime import datetime
 from typing import Any
 
 import aiohttp
 from aiohttp import web
 
+from prompt import build_voice_prompt, load_memory, render_recent_context
 from silence import SILENCE_INSTRUCTION, is_silent
 
 log = logging.getLogger("webhook")
@@ -103,6 +105,10 @@ def build_app(
     secret: str | None = None,
     target_chat_id: int | None = None,
     voice_dispatch_secret: str | None = None,
+    voice_init_secret: str | None = None,
+    voice_persona_path: str | None = None,
+    memory_path: str | None = None,
+    tz=None,
     mcp_proxy_upstream: str | None = None,
     telegram_bot=None,
     history=None,
@@ -224,6 +230,62 @@ def build_app(
         asyncio.create_task(_process_voice_dispatch(instruction))
         return web.json_response({"status": "dispatched"})
 
+    async def voice_init_handler(request: web.Request) -> web.Response:
+        """Conversation-initiation webhook for the ElevenLabs phone agent.
+
+        ElevenLabs POSTs here at the start of each call; we return the live
+        shared context (current memory + recent main-DM history) so the voice
+        agent starts warm — the same brain as the text agent, never a cold
+        start. We return BOTH:
+          - `dynamic_variables` — for an ElevenLabs prompt that references
+            {{memory}} / {{recent_context}} / {{today}} placeholders, and
+          - a full `conversation_config_override.agent.prompt` — used verbatim
+            when prompt-override is enabled in the agent's security settings.
+        Whichever wiring is configured on the ElevenLabs side, it works.
+        """
+        provided = request.headers.get("x-dispatch-secret", "")
+        if not voice_init_secret or not hmac.compare_digest(
+            provided, voice_init_secret
+        ):
+            log.warning("voice init rejected: bad or missing secret header")
+            return web.Response(status=401, text="invalid secret")
+
+        recent = (
+            history.load_as_messages(target_chat_id)
+            if history is not None and target_chat_id is not None
+            else []
+        )
+        now = datetime.now(tz) if tz is not None else datetime.utcnow()
+        today = now.strftime("%A %d %B %Y, %H:%M %Z").strip()
+        memory_text = load_memory(memory_path) if memory_path else ""
+        recent_text = render_recent_context(recent)
+        try:
+            voice_prompt = build_voice_prompt(
+                persona_path=voice_persona_path,
+                memory_path=memory_path,
+                recent_messages=recent,
+                today=today,
+            )
+        except Exception:
+            log.exception("failed to build voice prompt; serving dynamic vars only")
+            voice_prompt = None
+
+        body: dict[str, Any] = {
+            "type": "conversation_initiation_client_data",
+            "dynamic_variables": {
+                "memory": memory_text,
+                "recent_context": recent_text,
+                "today": today,
+            },
+        }
+        if voice_prompt:
+            body["conversation_config_override"] = {
+                "agent": {"prompt": {"prompt": voice_prompt}}
+            }
+        log.info("served voice-init context (memory=%dch, recent=%dch)",
+                 len(memory_text), len(recent_text))
+        return web.json_response(body)
+
     async def mcp_proxy_handler(request: web.Request) -> web.StreamResponse:
         """Transparent MCP Streamable-HTTP proxy.
 
@@ -276,6 +338,8 @@ def build_app(
         app.router.add_post("/composio/webhook", webhook_handler)
     if voice_dispatch_secret and target_chat_id is not None:
         app.router.add_post("/voice/dispatch", voice_dispatch_handler)
+    if voice_init_secret and target_chat_id is not None and voice_persona_path:
+        app.router.add_post("/voice/init", voice_init_handler)
     if mcp_proxy_upstream:
         for method in ("POST", "GET", "DELETE"):
             app.router.add_route(method, "/mcp", mcp_proxy_handler)

@@ -86,6 +86,42 @@ IRIS_VOICE_DISPATCH_URL=https://iris-familiar.fly.dev/voice/dispatch
 VOICE_DISPATCH_SECRET=...
 ```
 
+### Shared context (voice ⇄ text)
+
+The phone agent gets the **same brain as the text agent** via a
+conversation-initiation webhook on the Fly server:
+
+```
+POST https://iris-familiar.fly.dev/voice/init
+header: x-dispatch-secret: <VOICE_INIT_SECRET, defaults to VOICE_DISPATCH_SECRET>
+```
+
+ElevenLabs calls this at the start of every call. The server reads the live
+`/data/memory.md` plus the tail of the main DM history (keyed off
+`TRIGGER_CHAT_ID`) and returns:
+
+- `dynamic_variables`: `{ memory, recent_context, today }` — substituted into
+  any `{{memory}}` / `{{recent_context}}` / `{{today}}` placeholders in the
+  ElevenLabs-side prompt; **and**
+- `conversation_config_override.agent.prompt.prompt`: the full phone system
+  prompt (voice persona + memory + recent history), built by
+  `build_voice_prompt()` and used verbatim **if** prompt-override is enabled
+  in the agent's Security settings.
+
+Both are returned so either wiring works. To finish wiring on the ElevenLabs
+side (dashboard or agent-as-code), pick one:
+
+1. **Override (simplest, recommended):** in the agent's *Security* tab enable
+   "Overrides → System prompt", then set the agent's conversation-initiation
+   webhook to `/voice/init`. The server-built prompt replaces the dashboard
+   prompt each call — fully managed here.
+2. **Dynamic variables:** keep the persona in the dashboard prompt and add
+   `{{memory}}` and `{{recent_context}}` placeholders where you want the
+   context injected; the webhook fills them. No override permission needed.
+
+Because the context is fetched fresh per call, memory/history edits made by
+the text agent show up on the very next call — no re-provisioning.
+
 The Claude Agent SDK spawns the `claude` CLI as a subprocess, so you need Claude Code installed locally:
 
 ```bash

@@ -176,6 +176,74 @@ parallel track, or when a thread is getting crowded. Tell the user which \
 topic you opened."""
 
 
+# Built fresh for each phone call and handed to ElevenLabs via the
+# conversation-initiation webhook (POST /voice/init). The voice agent keeps
+# its own short phone persona, but gets the SAME memory + recent Telegram
+# history the text agent sees, so it walks into every call already knowing
+# what's going on in Damon's life — one shared brain, not a cold start.
+VOICE_PROMPT_TEMPLATE = """\
+{persona}
+
+## Shared context — you and text-Iris are one assistant
+
+You and the Telegram/text version of Iris share one brain and one long-term \
+memory. Everything below is your CURRENT memory plus the most recent \
+Telegram conversation, so you start this call already up to speed. Lean on \
+it: don't ask Damon about things you can already see here, and talk about \
+"your tasks", "your email", "your calendar" naturally rather than naming the \
+underlying tools. If something worth remembering comes up on this call, hand \
+it to your text self (via dispatch_task) so it lands in the shared memory.
+
+Today is {today}.
+
+<memory>
+{memory_content}
+</memory>
+
+## Most recent Telegram conversation (oldest first, newest last)
+{recent_context}
+"""
+
+
+def render_recent_context(
+    messages: list[dict], *, max_turns: int = 24, max_chars: int = 6000
+) -> str:
+    """Render the tail of a session as a compact Damon/Iris transcript for the
+    voice agent's conversation-initiation context. Bounded by turn count and a
+    char cap so a long history can't blow up the phone-agent prompt."""
+    lines: list[str] = []
+    for m in messages[-max_turns:]:
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        # Assistant rows are stored unlabelled; user rows already carry the
+        # speaker's name from load_as_messages, so don't double-prefix them.
+        lines.append(f"Iris: {content}" if m.get("role") == "assistant" else content)
+    text = "\n".join(lines).strip()
+    if not text:
+        return "(no recent conversation)"
+    if len(text) > max_chars:
+        text = "…(earlier turns omitted)…\n" + text[-max_chars:]
+    return text
+
+
+def build_voice_prompt(
+    *,
+    persona_path: str,
+    memory_path: str,
+    recent_messages: list[dict],
+    today: str,
+) -> str:
+    """Full system prompt for the ElevenLabs phone agent, mirroring the text
+    agent's context: voice persona + shared memory + recent DM history."""
+    return VOICE_PROMPT_TEMPLATE.format(
+        persona=load_persona(persona_path),
+        memory_content=load_memory(memory_path),
+        recent_context=render_recent_context(recent_messages),
+        today=today,
+    )
+
+
 def render_transcript(messages: list[dict]) -> str:
     body = "\n".join(
         f"assistant: {m['content']}" if m["role"] == "assistant" else m["content"]

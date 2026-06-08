@@ -464,11 +464,20 @@ async def _run() -> None:
     webhook_secret = os.environ.get("COMPOSIO_WEBHOOK_SECRET")
     trigger_chat_raw = os.environ.get("TRIGGER_CHAT_ID")
     voice_dispatch_secret = os.environ.get("VOICE_DISPATCH_SECRET")
+    # Conversation-initiation webhook for the voice agent reuses the dispatch
+    # secret by default (same ElevenLabs↔Fly trust boundary); override with
+    # VOICE_INIT_SECRET if you want them separate.
+    voice_init_secret = os.environ.get("VOICE_INIT_SECRET") or voice_dispatch_secret
+    voice_persona_path = os.environ.get("VOICE_PERSONA_PATH", "prompts/iris_voice.md")
     mcp_proxy_upstream = os.environ.get("MCP_PROXY_UPSTREAM")
     aiohttp_app = build_webhook_app(
         secret=webhook_secret,
         target_chat_id=int(trigger_chat_raw) if trigger_chat_raw else None,
         voice_dispatch_secret=voice_dispatch_secret,
+        voice_init_secret=voice_init_secret,
+        voice_persona_path=voice_persona_path,
+        memory_path=respond_cfg["memory_path"],
+        tz=ZoneInfo(os.environ.get("TIMEZONE", "UTC")),
         mcp_proxy_upstream=mcp_proxy_upstream,
         telegram_bot=app.bot,
         history=history,
@@ -484,6 +493,8 @@ async def _run() -> None:
         log.info("composio webhook listening on 0.0.0.0:%d", port)
     else:
         log.info("http /health listening on 0.0.0.0:%d (webhook disabled)", port)
+    if voice_init_secret and trigger_chat_raw:
+        log.info("voice-init shared-context endpoint live at /voice/init")
 
     # In-process scheduler: periodically nudge the agent so it has a chance
     # to act proactively (check email, surface reminders, etc). Silence is
