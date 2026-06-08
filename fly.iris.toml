@@ -19,6 +19,9 @@ primary_region = "iad"
   ATTACHMENTS_DIR = "/data/attachments"
   SCHEDULE_INTERVAL_SECONDS = "3600"
   TIMEZONE = "Europe/London"
+  # Hour (local TZ) of the once-daily minimal triage nudge. All other hourly
+  # ticks are travel/deadline-only. See _run_scheduler in src/bot.py.
+  TRIAGE_HOUR = "8"
   PORT = "8080"
   # Self-improvement: a checkout of her own repo on the volume, plus the
   # command she runs to deploy herself. Needs GITHUB_TOKEN + FLY_API_TOKEN

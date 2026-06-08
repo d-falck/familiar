@@ -29,6 +29,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
+# The once-daily morning nudge fired by the scheduler. Kept deliberately tight:
+# Damon is overwhelmed and wants a short nudge, not a wall of text. Iterate on
+# this over time.
+TRIAGE_INSTRUCTION = (
+    "Daily triage nudge. Give Damon a SHORT morning glance so he stays on top "
+    "of things — aim for a handful of lines he can read in ~15 seconds, never a "
+    "full inbox/task dump. Surface only: (1) anything genuinely needing his "
+    "attention or action today (same-day deadlines, someone blocked on him, "
+    "time-sensitive replies); (2) a one-line pointer to his most important open "
+    "task(s). Skip newsletters, receipts, routine noise. Do NOT re-nag items "
+    "already flagged on previous days. If there is genuinely nothing worth a "
+    f"nudge, respond with the silence sentinel.\n\n{SILENCE_INSTRUCTION}"
+)
+
 
 def _describe_tool_input(tool_input: dict) -> str:
     """Pick a key field from a tool's input to show in the status line."""
@@ -295,17 +309,29 @@ async def _run_scheduler(
     telegram_bot,
     history,
     respond_cfg: dict,
+    triage_hour: int = 8,
 ) -> None:
+    """In-process hourly loop. Exactly one tick per day (the one landing on
+    ``triage_hour``) carries the minimal daily-triage nudge; every other tick
+    is travel/deadline-only so the loop stays near-silent the rest of the day.
+    """
     from datetime import datetime
 
     while True:
         await asyncio.sleep(_seconds_to_next_boundary(interval_seconds, tz))
         try:
-            now = datetime.now(tz).strftime("%a %Y-%m-%d %H:%M %Z")
-            prompt = (
-                f"[scheduled check-in @ {now}] Anything worth doing right "
-                f"now? If yes, act and report.\n\n{SILENCE_INSTRUCTION}"
-            )
+            now_dt = datetime.now(tz)
+            now = now_dt.strftime("%a %Y-%m-%d %H:%M %Z")
+            if now_dt.hour == triage_hour:
+                prompt = f"[scheduled check-in @ {now}] {TRIAGE_INSTRUCTION}"
+            else:
+                prompt = (
+                    f"[scheduled check-in @ {now}] Non-triage tick. Only break "
+                    f"silence for a travel departure reminder that is due now "
+                    f"(per the travel rules in memory), or a genuine same-day "
+                    f"deadline with real cost. Otherwise stay silent.\n\n"
+                    f"{SILENCE_INSTRUCTION}"
+                )
             messages = history.load_as_messages(chat_id)
             messages.append({"role": "user", "content": prompt})
             reply = await respond(messages, **respond_cfg)
@@ -473,9 +499,15 @@ async def _run() -> None:
                 telegram_bot=app.bot,
                 history=history,
                 respond_cfg=respond_cfg,
+                triage_hour=int(os.environ.get("TRIAGE_HOUR", "8")),
             )
         )
-        log.info("scheduler running every %ss (tz=%s)", schedule_interval_raw, tz)
+        log.info(
+            "scheduler running every %ss (tz=%s, triage_hour=%s)",
+            schedule_interval_raw,
+            tz,
+            os.environ.get("TRIAGE_HOUR", "8"),
+        )
 
     try:
         await asyncio.Event().wait()

@@ -4,3 +4,4 @@ __pycache__/
 *.sqlite
 .venv/
 data/
+node_modules/
