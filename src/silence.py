@@ -32,4 +32,14 @@ def is_silent(reply: str | None) -> bool:
     if not reply:
         return True
     s = reply.strip()
-    return not s or bool(_SILENCE_RE.match(s))
+    if not s:
+        return True
+    if _SILENCE_RE.match(s):
+        return True
+    # The model sometimes narrates its silence and then appends the sentinel,
+    # e.g. "Nothing needs my attention right now.\n\n<silent>". It still meant
+    # to send nothing, so a standalone trailing silence token => silent turn.
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if lines and _SILENCE_RE.match(lines[-1]):
+        return True
+    return False
