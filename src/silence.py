@@ -17,7 +17,12 @@ SILENCE_INSTRUCTION = (
     f"context warrants a user-facing reply, or something genuinely needs "
     f"the user's attention right now, respond with EXACTLY "
     f"`{SILENCE_SENTINEL}` and nothing else — no commentary, no "
-    f"acknowledgement, no variations like `<silence>`."
+    f"acknowledgement, no variations like `<silence>`. NEVER narrate, "
+    f"explain, or describe your decision in the reply, in any language: do "
+    f"not write things like \"this is a non-triage tick\" or \"nothing "
+    f"warrants breaking silence\". Keep all such reasoning internal. Your "
+    f"entire reply is either a real user-facing message or the bare "
+    f"sentinel — nothing in between."
 )
 
 _SILENCE_RE = re.compile(
@@ -27,8 +32,37 @@ _SILENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A silence sentinel token (`<silent>`, `<silence>`, `(no response)`) appearing
+# ANYWHERE in the text. On a default-silent path its presence means the model
+# meant to stay silent but wrapped/appended the sentinel inside narration —
+# e.g. "…我应该回复 `<silent>`。<silent>" (language-agnostic).
+_SILENCE_TOKEN_ANYWHERE_RE = re.compile(
+    r"[<(\[]\s*(?:silent|silence|no[-_ ]?response)\s*[>)\]]",
+    re.IGNORECASE,
+)
+
+# High-precision echoes of the scheduler/proactive *prompt* that only appear
+# when the model leaks its internal deliberation instead of emitting the bare
+# sentinel. These never occur in a genuine proactive nudge (travel reminder,
+# deadline, email flag) or a real triage summary, so matching them on a
+# default-silent path is safe. Cross-language leaks are still caught above via
+# the sentinel checks.
+_REASONING_LEAK_RE = re.compile(
+    r"non[-\s]?triage tick"
+    r"|scheduled (?:check[-\s]?in|tick)"
+    r"|break(?:ing)? silence"
+    r"|(?:stay|remain|staying|remaining|should stay|will stay) silent",
+    re.IGNORECASE,
+)
+
 
 def is_silent(reply: str | None) -> bool:
+    """True when a *proactive*, default-silent turn should send nothing.
+
+    Only applied to default-silent paths (scheduler ticks, trigger handlers),
+    never to a normal user reply — so it can aggressively swallow leaked
+    sentinels and leaked internal deliberation without risking a real answer.
+    """
     if not reply:
         return True
     s = reply.strip()
@@ -36,10 +70,14 @@ def is_silent(reply: str | None) -> bool:
         return True
     if _SILENCE_RE.match(s):
         return True
-    # The model sometimes narrates its silence and then appends the sentinel,
-    # e.g. "Nothing needs my attention right now.\n\n<silent>". It still meant
-    # to send nothing, so a standalone trailing silence token => silent turn.
+    # Narration then a standalone sentinel on the final line.
     lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
     if lines and _SILENCE_RE.match(lines[-1]):
+        return True
+    # A sentinel appended/embedded anywhere (any language).
+    if _SILENCE_TOKEN_ANYWHERE_RE.search(s):
+        return True
+    # Leaked internal deliberation about whether to break silence.
+    if _REASONING_LEAK_RE.search(s):
         return True
     return False
