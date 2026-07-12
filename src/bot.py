@@ -19,7 +19,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from agent import respond
 from history import History
-from silence import SILENCE_INSTRUCTION, is_silent
+from silence import SILENCE_INSTRUCTION, is_placeholder_reply, is_silent
 from telegram_md import send_markdown
 from voice import transcribe as transcribe_voice
 from webhook import build_app as build_webhook_app
@@ -29,6 +29,15 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger("bot")
+
+# Sent on a direct user turn when the model collapses into a bare placeholder
+# ("(no response)"/"<silent>"/empty) instead of a real answer. Never send the
+# raw placeholder to the user — that's a bug, not a message.
+EMPTY_REPLY_FALLBACK = (
+    "⚠️ Sorry — that turn ended without producing a reply (usually a "
+    "long/heavy task dropping its output). Nothing's lost on my end — re-send "
+    "and I'll pick it straight back up."
+)
 
 # The once-daily morning nudge fired by the scheduler. Kept deliberately tight:
 # Damon is overwhelmed and wants a short nudge, not a wall of text. Iterate on
@@ -327,6 +336,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             reply = f"⚠️ {exc}"
         finally:
             typing.cancel()
+
+        # A direct user turn should NEVER answer with a bare placeholder. If the
+        # model collapsed (empty result / "(no response)" / a stray sentinel),
+        # swap in an honest message instead of sending the literal garbage.
+        if not error and is_placeholder_reply(reply):
+            log.warning(
+                "collapsed placeholder reply on user path chat=%s thread=%s reply=%r",
+                chat.id,
+                thread_id,
+                reply,
+            )
+            reply = EMPTY_REPLY_FALLBACK
 
         history.add_assistant(chat.id, reply, thread_id=thread_id)
         await set_reaction(REACTION_ERROR if error else None)

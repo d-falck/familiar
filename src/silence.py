@@ -56,6 +56,25 @@ _REASONING_LEAK_RE = re.compile(
 )
 
 
+def is_placeholder_reply(reply: str | None) -> bool:
+    """True when the ENTIRE reply is empty or a bare silence/no-response
+    sentinel — i.e. the model collapsed instead of producing real text.
+
+    SAFE for a NORMAL user-reply path (unlike is_silent, which also matches
+    embedded sentinels and reasoning-leak phrases): this only fires when the
+    *whole* stripped message is a sentinel, so a genuine answer that merely
+    mentions "silence" or "no response" mid-sentence will NOT match. Use it to
+    catch a collapsed turn and replace the confusing literal "(no response)"
+    placeholder with an honest message, rather than sending garbage to the user.
+    """
+    if not reply:
+        return True
+    s = reply.strip()
+    if not s:
+        return True
+    return bool(_SILENCE_RE.match(s))
+
+
 def is_silent(reply: str | None) -> bool:
     """True when a *proactive*, default-silent turn should send nothing.
 
