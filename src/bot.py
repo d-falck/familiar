@@ -43,14 +43,19 @@ EMPTY_REPLY_FALLBACK = (
 # Damon is overwhelmed and wants a short nudge, not a wall of text. Iterate on
 # this over time.
 TRIAGE_INSTRUCTION = (
-    "Daily triage nudge. Give Damon a SHORT morning glance so he stays on top "
-    "of things — aim for a handful of lines he can read in ~15 seconds, never a "
-    "full inbox/task dump. Surface only: (1) anything genuinely needing his "
-    "attention or action today (same-day deadlines, someone blocked on him, "
-    "time-sensitive replies); (2) a one-line pointer to his most important open "
-    "task(s). Skip newsletters, receipts, routine noise. Do NOT re-nag items "
-    "already flagged on previous days. If there is genuinely nothing worth a "
-    f"nudge, respond with the silence sentinel.\n\n{SILENCE_INSTRUCTION}"
+    "Daily triage nudge — HIGH bar, silent-by-default. Most mornings there is "
+    "nothing worth sending: when that's the case, respond with the silence "
+    "sentinel and send nothing. Only break silence for a GENUINE same-day "
+    "actionable with real cost: a hard deadline today, someone actively blocked "
+    "on his reply, or a time-critical change. Keep it to a couple of lines. "
+    "Do NOT surface: (a) anything already on his calendar or that recurs and he "
+    "already knows about — housekeeper/cleaner days, scheduled meetings, "
+    "rehearsals, deliveries, parcels; (b) a generic 'your most important task "
+    "today is X' or task-list pointer — he can see his own task list; (c) "
+    "newsletters, receipts, routine noise; (d) anything already flagged on a "
+    "previous day. He has repeatedly called routine morning nudges noise, so "
+    "when in doubt, stay silent.\n\n"
+    f"{SILENCE_INSTRUCTION}"
 )
 
 
