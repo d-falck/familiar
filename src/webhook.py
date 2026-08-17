@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 from collections import OrderedDict
 from datetime import datetime
@@ -340,11 +341,85 @@ def build_app(
                 await response.write_eof()
                 return response
 
+    # --- Macro tracker widget endpoint --------------------------------
+    # Serves today's calorie/macro totals + remaining-vs-target as JSON so
+    # a home-screen Scriptable widget can render Nutracheck-style rings.
+    # Auth: ?token=<MACRO_WIDGET_SECRET> or x-macro-secret header.
+    macro_secret = os.environ.get("MACRO_WIDGET_SECRET")
+    macro_db_id = os.environ.get(
+        "MACRO_DB_ID", "3bf212bf-d261-816d-851e-d4de200b79e0"
+    )
+    macro_user_id = os.environ.get("MACRO_USER_ID", "user_d6iab")
+    _macro_client: dict[str, Any] = {}
+
+    def _macro_targets() -> dict[str, float]:
+        return {
+            "calories": float(os.environ.get("MACRO_TARGET_CALORIES", "1750")),
+            "protein": float(os.environ.get("MACRO_TARGET_PROTEIN", "150")),
+            "carbs": float(os.environ.get("MACRO_TARGET_CARBS", "160")),
+            "fat": float(os.environ.get("MACRO_TARGET_FAT", "56.7")),
+        }
+
+    def _fetch_macros_sync(day: str) -> dict:
+        from composio import Composio
+
+        client = _macro_client.get("c")
+        if client is None:
+            client = Composio()
+            _macro_client["c"] = client
+        r = client.tools.execute(
+            "NOTION_QUERY_DATABASE",
+            user_id=macro_user_id,
+            dangerously_skip_version_check=True,
+            arguments={
+                "database_id": macro_db_id,
+                "filter": {"property": "Date", "date": {"equals": day}},
+            },
+        )
+        results = ((r.get("data") or {}).get("results")) or []
+
+        def num(props: dict, key: str) -> float:
+            return (props.get(key) or {}).get("number") or 0
+
+        consumed = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+        for row in results:
+            props = row.get("properties") or {}
+            consumed["calories"] += num(props, "Calories")
+            consumed["protein"] += num(props, "Protein (g)")
+            consumed["carbs"] += num(props, "Carbs (g)")
+            consumed["fat"] += num(props, "Fat (g)")
+        targets = _macro_targets()
+        remaining = {k: round(targets[k] - consumed[k], 1) for k in targets}
+        return {
+            "date": day,
+            "items": len(results),
+            "targets": {k: round(v, 1) for k, v in targets.items()},
+            "consumed": {k: round(v, 1) for k, v in consumed.items()},
+            "remaining": remaining,
+        }
+
+    async def macros_today_handler(request: web.Request) -> web.Response:
+        provided = request.query.get("token") or request.headers.get(
+            "x-macro-secret", ""
+        )
+        if not macro_secret or not hmac.compare_digest(provided, macro_secret):
+            return web.Response(status=401, text="invalid token")
+        now = datetime.now(tz) if tz is not None else datetime.utcnow()
+        day = request.query.get("date") or now.strftime("%Y-%m-%d")
+        try:
+            data = await asyncio.to_thread(_fetch_macros_sync, day)
+        except Exception as exc:
+            log.exception("macros endpoint failed")
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response(data, headers={"Cache-Control": "no-store"})
+
     async def health(_request: web.Request) -> web.Response:
         return web.Response(status=200, text="ok")
 
     app = web.Application()
     app.router.add_get("/health", health)
+    if macro_secret:
+        app.router.add_get("/macros/today", macros_today_handler)
     if secret and target_chat_id is not None:
         app.router.add_post("/composio/webhook", webhook_handler)
     if voice_dispatch_secret and target_chat_id is not None:
