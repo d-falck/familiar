@@ -367,23 +367,46 @@ def build_app(
         if client is None:
             client = Composio()
             _macro_client["c"] = client
-        r = client.tools.execute(
-            "NOTION_QUERY_DATABASE",
-            user_id=macro_user_id,
-            dangerously_skip_version_check=True,
-            arguments={
-                "database_id": macro_db_id,
-                "filter": {"property": "Date", "date": {"equals": day}},
-            },
-        )
-        results = ((r.get("data") or {}).get("results")) or []
+
+        # NOTE: the current NOTION_QUERY_DATABASE tool version silently drops
+        # any `filter` argument (it isn't in the param schema), so a server-side
+        # date filter returns ALL rows. We therefore paginate through every row
+        # and filter client-side on the Date property. Hard-capped so a runaway
+        # log can never loop forever.
+        rows: list[dict] = []
+        cursor: str | None = None
+        for _ in range(50):  # 50 pages * 100 = up to 5000 rows
+            args: dict[str, Any] = {"database_id": macro_db_id, "page_size": 100}
+            if cursor:
+                args["start_cursor"] = cursor
+            r = client.tools.execute(
+                "NOTION_QUERY_DATABASE",
+                user_id=macro_user_id,
+                dangerously_skip_version_check=True,
+                arguments=args,
+            )
+            data = r.get("data") or {}
+            rows.extend(data.get("results") or [])
+            if not data.get("has_more"):
+                break
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
 
         def num(props: dict, key: str) -> float:
             return (props.get(key) or {}).get("number") or 0
 
+        def row_day(props: dict) -> str:
+            d = (props.get("Date") or {}).get("date") or {}
+            return (d.get("start") or "")[:10]
+
         consumed = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
-        for row in results:
+        count = 0
+        for row in rows:
             props = row.get("properties") or {}
+            if row_day(props) != day:
+                continue
+            count += 1
             consumed["calories"] += num(props, "Calories")
             consumed["protein"] += num(props, "Protein (g)")
             consumed["carbs"] += num(props, "Carbs (g)")
@@ -392,7 +415,7 @@ def build_app(
         remaining = {k: round(targets[k] - consumed[k], 1) for k in targets}
         return {
             "date": day,
-            "items": len(results),
+            "items": count,
             "targets": {k: round(v, 1) for k, v in targets.items()},
             "consumed": {k: round(v, 1) for k, v in consumed.items()},
             "remaining": remaining,
