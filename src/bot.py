@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 from collections import deque
 from pathlib import Path
@@ -215,6 +216,24 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             log.exception("voice transcription failed")
             transcript = "(voice note — transcription failed)"
         text = (text + f"\n[voice] {transcript}").strip()
+
+    # CSV/XLSX/PDF exports arrive as Telegram documents. Persist them and put
+    # their path into the model context. Documents used to be absent from the
+    # handler filter, which meant they were silently discarded before here.
+    if message.document:
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        document = message.document
+        original_name = document.file_name or "attachment"
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original_name).strip("._")
+        if not safe_name:
+            safe_name = "attachment"
+        file = await document.get_file()
+        document_path = attachments_dir / f"{chat.id}_{message.message_id}_{safe_name}"
+        await file.download_to_drive(document_path)
+        text = (
+            text
+            + f"\n[attached file: {document_path}; original name: {original_name}]"
+        ).strip()
 
     if not text:
         return
@@ -622,7 +641,13 @@ async def _run() -> None:
     app.add_handler(
         MessageHandler(
             (filters.ChatType.GROUPS | filters.ChatType.PRIVATE)
-            & (filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VOICE),
+            & (
+                filters.TEXT
+                | filters.CAPTION
+                | filters.PHOTO
+                | filters.VOICE
+                | filters.Document.ALL
+            ),
             on_message,
         )
     )
