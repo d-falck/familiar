@@ -42,6 +42,22 @@ EMPTY_REPLY_FALLBACK = (
     "and I'll pick it straight back up."
 )
 
+_TRANSIENT_STREAM_ERRORS = (
+    "separator is not found, and chunk exceed the limit",
+    "the socket connection was closed unexpectedly",
+)
+
+
+def _user_error_message(exc: Exception) -> str:
+    """Never leak low-level provider/HTTP parser errors into Telegram."""
+    detail = str(exc).lower()
+    if any(marker in detail for marker in _TRANSIENT_STREAM_ERRORS):
+        return (
+            "That turn hit a temporary connection error. Please send it again; "
+            "your previous data was not changed."
+        )
+    return "I hit an internal error on that turn. Please try again."
+
 # Sent instead of the raw provider refusal string when a turn comes back as a
 # usage-policy block. The refusal itself is never written to history: the whole
 # transcript is replayed on every turn and the classifier reads all of it, so a
@@ -473,7 +489,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             log.exception("respond failed")
             error = exc
-            reply = f"⚠️ {exc}"
+            reply = _user_error_message(exc)
         finally:
             typing.cancel()
 
