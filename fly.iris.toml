@@ -10,7 +10,7 @@ primary_region = "iad"
   PERSONA_PATH = "prompts/assistant.md"
   AGENT_BACKEND = "codex"
   ANTHROPIC_MODEL = "claude-opus-4-8[1m]"
-  CODEX_MODEL = "gpt-5.5"
+  CODEX_MODEL = "gpt-5.6-sol"
   # Codex won't create helper binaries under /tmp, so keep its home on the volume.
   CODEX_HOME_BASE = "/data"
   MAX_AGENT_TURNS = "40"
