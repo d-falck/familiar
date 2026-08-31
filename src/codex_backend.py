@@ -98,6 +98,11 @@ async def run(
     on_thinking: Callable[[str], Awaitable[None]] | None = None,
     on_tool_result: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> str:
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "AGENT_BACKEND=codex but OPENAI_API_KEY is unset — "
+            "`fly secrets set OPENAI_API_KEY=sk-...`"
+        )
     codex_home = _write_codex_home(mcp_servers)
     final_file = Path(codex_home, "final.txt")
     full_prompt = f"{system_prompt}\n\n{render_transcript(messages)}"
@@ -170,11 +175,22 @@ async def _run_proc(
         )
 
     await proc.wait()
-    if proc.returncode != 0:
-        stderr = (await proc.stderr.read()).decode(errors="replace")
-        log.error("codex exited %s: %s", proc.returncode, stderr[:1000])
 
     final = ""
     if final_file.exists():
         final = final_file.read_text().strip()
-    return final or last_text or "(no response)"
+    reply = final or last_text
+
+    if proc.returncode != 0:
+        stderr = (await proc.stderr.read()).decode(errors="replace").strip()
+        log.error("codex exited %s: %s", proc.returncode, stderr[:2000])
+        # A hard exit with nothing produced is almost always auth or billing
+        # (this is how the last Codex attempt died: the account had no model
+        # quota). Raising surfaces the real cause in the chat instead of the
+        # generic "that turn produced no reply" fallback, which sent us
+        # hunting through Fly logs.
+        if not reply:
+            detail = stderr.splitlines()[-1] if stderr else "no stderr"
+            raise RuntimeError(f"codex exited {proc.returncode}: {detail[:500]}")
+
+    return reply or "(no response)"

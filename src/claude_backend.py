@@ -112,10 +112,17 @@ async def run(
                         if on_tool_result:
                             await on_tool_result(block.tool_use_id, content_str)
             elif isinstance(msg, ResultMessage):
+                # subtype/is_error distinguish a genuine reply from an
+                # SDK-level abort (including a usage-policy block, which comes
+                # back as an error result rather than text) — without them a
+                # refusal is indistinguishable from a quiet turn in the logs.
                 log.info(
-                    "[claude result] num_turns=%s stop_reason=%s text=%s",
+                    "[claude result] num_turns=%s stop_reason=%s subtype=%s "
+                    "is_error=%s text=%s",
                     msg.num_turns,
                     msg.stop_reason,
+                    getattr(msg, "subtype", None),
+                    getattr(msg, "is_error", None),
                     (msg.result or "")[:500],
                 )
                 return msg.result or "(no response)"

@@ -19,6 +19,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from agent import respond
 from history import History
+from refusal import is_refusal
 from silence import SILENCE_INSTRUCTION, is_placeholder_reply, is_silent
 from telegram_md import send_markdown
 from voice import transcribe as transcribe_voice
@@ -37,6 +38,16 @@ EMPTY_REPLY_FALLBACK = (
     "⚠️ Sorry — that turn ended without producing a reply (usually a "
     "long/heavy task dropping its output). Nothing's lost on my end — re-send "
     "and I'll pick it straight back up."
+)
+
+# Sent instead of the raw provider refusal string when a turn comes back as a
+# usage-policy block. The refusal itself is never written to history: the whole
+# transcript is replayed on every turn and the classifier reads all of it, so a
+# stored refusal re-trips it forever and wedges the session (see refusal.py).
+REFUSAL_FALLBACK = (
+    "⚠️ That turn came back as a provider usage-policy block, not a real "
+    "reply. I haven't saved it to this conversation, so it won't wedge the "
+    "thread — try rephrasing, or start a fresh topic if it keeps happening."
 )
 
 # The once-daily morning nudge fired by the scheduler. Kept deliberately tight:
@@ -342,10 +353,21 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         finally:
             typing.cancel()
 
+        # A provider usage-policy block can arrive either as the turn text or
+        # wrapped in the exception we just formatted, so check both.
+        refused = is_refusal(reply)
+        if refused:
+            log.error(
+                "provider refusal on user path chat=%s thread=%s reply=%r",
+                chat.id,
+                thread_id,
+                reply,
+            )
+            reply = REFUSAL_FALLBACK
         # A direct user turn should NEVER answer with a bare placeholder. If the
         # model collapsed (empty result / "(no response)" / a stray sentinel),
         # swap in an honest message instead of sending the literal garbage.
-        if not error and is_placeholder_reply(reply):
+        elif not error and is_placeholder_reply(reply):
             log.warning(
                 "collapsed placeholder reply on user path chat=%s thread=%s reply=%r",
                 chat.id,
@@ -354,9 +376,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             reply = EMPTY_REPLY_FALLBACK
 
-        history.add_assistant(chat.id, reply, thread_id=thread_id)
-        await set_reaction(REACTION_ERROR if error else None)
-        await send_debug((f"⚠️ {error}" if error else f"✅ {reply}"))
+        if not refused:
+            history.add_assistant(chat.id, reply, thread_id=thread_id)
+        await set_reaction(REACTION_ERROR if error or refused else None)
+        await send_debug(f"⚠️ {error}" if error else f"{'⚠️' if refused else '✅'} {reply}")
         # If the final reply is identical to the last text block we already
         # streamed, skip it — no point duplicating the message.
         if error or reply != last_streamed_text["value"]:
@@ -452,7 +475,11 @@ async def _run_scheduler(
             messages = history.load_as_messages(chat_id)
             messages.append({"role": "user", "content": prompt})
             reply = await respond(messages, **respond_cfg)
-            if not is_silent(reply):
+            if is_refusal(reply):
+                # Never persist or send a usage-policy block — a stored one is
+                # replayed to the classifier on every later turn (refusal.py).
+                log.error("provider refusal on scheduled tick reply=%r", reply)
+            elif not is_silent(reply):
                 history.add_assistant(chat_id, reply)
                 await send_markdown(
                     lambda body, pm: telegram_bot.send_message(
