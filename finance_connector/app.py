@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import base64
+import asyncio
+import datetime as dt
 import hmac
+import json
 import os
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 
 import aiohttp
 from aiohttp import web
@@ -42,6 +47,12 @@ OB_READ_PREFIXES = (
 )
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~-]+$")
+_XLSX_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_EMMA_FIELDS = (
+    "ID", "Date", "Amount", "Account", "Bank", "Currency", "Category",
+    "Subcategory", "Type", "Tags", "Counterparty", "Custom Name",
+    "Merchant", "Additional details", "Notes", "Linked transaction ID",
+)
 
 
 def _required(name: str) -> str:
@@ -103,7 +114,85 @@ async def providers(request: web.Request) -> web.Response:
         "trading212": bool(os.getenv("TRADING212_API_KEY") and os.getenv("TRADING212_API_SECRET")),
         "monzo": bool(os.getenv("MONZO_OB_ACCESS_TOKEN")),
         "amex": bool(os.getenv("AMEX_OB_ACCESS_TOKEN")),
+        "emma_export": bool(os.getenv("EMMA_EXPORT_XLSX_PATH")),
     })
+
+
+def _xlsx_cell_value(cell: ET.Element, shared: list[str]) -> str:
+    kind = cell.attrib.get("t")
+    value = cell.find(f"{{{_XLSX_NS}}}v")
+    raw = "" if value is None or value.text is None else value.text
+    if kind == "s" and raw:
+        return shared[int(raw)]
+    if kind == "inlineStr":
+        return "".join(t.text or "" for t in cell.iter(f"{{{_XLSX_NS}}}t"))
+    return raw
+
+
+def _read_emma_export(path: str) -> list[dict[str, str]]:
+    """Read Emma's XLSX export without retaining or logging its contents."""
+    with zipfile.ZipFile(path) as archive:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared = [
+                "".join(t.text or "" for t in item.iter(f"{{{_XLSX_NS}}}t"))
+                for item in root
+            ]
+        sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        rows: list[dict[str, str]] = []
+        for row in sheet.findall(f".//{{{_XLSX_NS}}}row"):
+            values: dict[str, str] = {}
+            for cell in row.findall(f"{{{_XLSX_NS}}}c"):
+                column = "".join(ch for ch in cell.attrib["r"] if ch.isalpha())
+                values[column] = _xlsx_cell_value(cell, shared)
+            rows.append(values)
+    if not rows:
+        return []
+    columns = {value: column for column, value in rows[0].items()}
+    if not set(_EMMA_FIELDS).issubset(columns):
+        missing = sorted(set(_EMMA_FIELDS) - set(columns))
+        raise ValueError(f"Emma export is missing columns: {', '.join(missing)}")
+    return [
+        {field: row.get(columns[field], "") for field in _EMMA_FIELDS}
+        for row in rows[1:]
+    ]
+
+
+def _parse_iso_date(value: str, name: str) -> dt.date | None:
+    if not value:
+        return None
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=f"invalid {name}; expected YYYY-MM-DD") from exc
+
+
+async def emma_transactions(request: web.Request) -> web.Response:
+    path = _required("EMMA_EXPORT_XLSX_PATH")
+    start = _parse_iso_date(request.query.get("from", ""), "from")
+    end = _parse_iso_date(request.query.get("to", ""), "to")
+    if start and end and start > end:
+        raise web.HTTPBadRequest(text="from must not be after to")
+    bank = request.query.get("bank", "").casefold()
+    account = request.query.get("account", "").casefold()
+    rows = await asyncio.get_running_loop().run_in_executor(
+        None, _read_emma_export, path
+    )
+    result = []
+    for row in rows:
+        row_date = dt.date.fromisoformat(row["Date"])
+        if start and row_date < start or end and row_date > end:
+            continue
+        if bank and row["Bank"].casefold() != bank:
+            continue
+        if account and row["Account"].casefold() != account:
+            continue
+        result.append(row)
+    return web.Response(
+        text=json.dumps({"count": len(result), "transactions": result}),
+        content_type="application/json",
+    )
 
 
 async def trading212(request: web.Request) -> web.Response:
@@ -167,6 +256,7 @@ def build_app(*, connector_secret: str | None = None) -> web.Application:
     app["session"] = None
     app.router.add_get("/health", health)
     app.router.add_get("/v1/providers", providers)
+    app.router.add_get("/v1/emma/transactions", emma_transactions)
     app.router.add_get("/v1/trading212/{tail:.*}", trading212)
     app.router.add_get("/v1/open-banking/{provider}/{tail:.*}", open_banking)
     app.on_cleanup.append(close_session)

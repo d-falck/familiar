@@ -188,3 +188,9 @@ order placement. Monzo's production Open Banking interface requires a
 licensed Account Information Service Provider; Amex should be connected
 through the same provider. Put that provider's per-institution base URL and
 access token in `MONZO_OB_*` / `AMEX_OB_*`.
+
+Emma exports are supported as an alternative read-only Monzo/Amex source. Put
+the XLSX on the connector's private volume and set `EMMA_EXPORT_XLSX_PATH` to
+its absolute path. `GET /v1/emma/transactions` accepts optional `from`, `to`,
+`bank`, and `account` filters. The service reads the file on demand and never
+copies transaction rows into the repository or a database.
