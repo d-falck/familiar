@@ -12,6 +12,7 @@ from collections import deque
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import aiohttp
 from aiohttp import web
 from composio import Composio
 from dotenv import load_dotenv
@@ -93,6 +94,64 @@ _DM_CONTEXT_SEP = (
 
 # How many recently-completed update ids to remember (in memory and on disk).
 _HANDLED_CAP = 2000
+
+
+async def _download_telegram_file(
+    telegram_file,
+    destination: Path,
+    *,
+    bot_token: str,
+    attempts: int = 3,
+) -> None:
+    """Download an attachment despite occasional PTB/httpx chunk failures."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.part")
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        temporary.unlink(missing_ok=True)
+        try:
+            await telegram_file.download_to_drive(temporary)
+            temporary.replace(destination)
+            return
+        except Exception as exc:
+            last_error = exc
+            log.warning(
+                "Telegram attachment download attempt %s/%s failed: %s",
+                attempt + 1,
+                attempts,
+                type(exc).__name__,
+            )
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.5 * (2**attempt))
+
+    # PTB normally supplies a complete URL. Construct one only for a relative
+    # Telegram file path. Never log it because it contains the bot token.
+    file_url = str(telegram_file.file_path or "")
+    if file_url and not file_url.startswith(("https://", "http://")):
+        file_url = f"https://api.telegram.org/file/bot{bot_token}/{file_url.lstrip('/')}"
+    if file_url:
+        temporary.unlink(missing_ok=True)
+        timeout = aiohttp.ClientTimeout(total=180, sock_connect=20, sock_read=60)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(file_url) as response:
+                    response.raise_for_status()
+                    with temporary.open("wb") as output:
+                        async for chunk in response.content.iter_chunked(256 * 1024):
+                            output.write(chunk)
+            temporary.replace(destination)
+            return
+        except Exception as exc:
+            last_error = exc
+            log.warning(
+                "Telegram attachment fallback download failed: %s",
+                type(exc).__name__,
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    raise RuntimeError("Telegram attachment download failed after retries") from last_error
 
 
 def _load_handled(path: Path) -> tuple[set[int], deque]:
@@ -229,7 +288,25 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             safe_name = "attachment"
         file = await document.get_file()
         document_path = attachments_dir / f"{chat.id}_{message.message_id}_{safe_name}"
-        await file.download_to_drive(document_path)
+        try:
+            await _download_telegram_file(
+                file,
+                document_path,
+                bot_token=context.bot.token,
+            )
+        except Exception:
+            log.exception(
+                "document download failed chat=%s message=%s file_id=%s",
+                chat.id,
+                message.message_id,
+                document.file_id,
+            )
+            await message.reply_text(
+                "I couldn't download that attachment after retrying. Please wait a "
+                "moment and resend it; if it fails again, send it as a ZIP or share "
+                "a download link."
+            )
+            return
         text = (
             text
             + f"\n[attached file: {document_path}; original name: {original_name}]"
