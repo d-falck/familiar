@@ -260,7 +260,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         photo = message.photo[-1]  # highest-resolution variant
         file = await photo.get_file()
         path = attachments_dir / f"{chat.id}_{message.message_id}.jpg"
-        await file.download_to_drive(path)
+        try:
+            await _download_telegram_file(file, path, bot_token=context.bot.token)
+        except Exception:
+            log.exception(
+                "photo download failed chat=%s message=%s file_id=%s",
+                chat.id,
+                message.message_id,
+                photo.file_id,
+            )
+            await message.reply_text(
+                "I couldn't download that photo after retrying. Please wait a "
+                "moment and resend it; if it fails again, send it as a file."
+            )
+            return
         text = (text + f"\n[attached image: {path}]").strip()
 
     # If the message is a voice note, download and transcribe with Whisper.
@@ -268,7 +281,22 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         attachments_dir.mkdir(parents=True, exist_ok=True)
         file = await message.voice.get_file()
         audio_path = attachments_dir / f"{chat.id}_{message.message_id}.ogg"
-        await file.download_to_drive(audio_path)
+        try:
+            await _download_telegram_file(
+                file, audio_path, bot_token=context.bot.token
+            )
+        except Exception:
+            log.exception(
+                "voice download failed chat=%s message=%s file_id=%s",
+                chat.id,
+                message.message_id,
+                message.voice.file_id,
+            )
+            await message.reply_text(
+                "I couldn't download that voice note after retrying. Please wait "
+                "a moment and resend it."
+            )
+            return
         try:
             transcript = await transcribe_voice(audio_path)
         except Exception:
