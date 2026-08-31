@@ -158,3 +158,33 @@ Long-polling means no public ports — Fly will run the machine without HTTP ser
 - **History model**: every group message is persisted, even ones that don't mention the bot. When the bot is mentioned, the full chat is replayed as a transcript prompt. With the 1M-context Opus model, compaction isn't needed for v1. If/when it is, add the `compact-2026-01-12` beta.
 - **Composio identity**: a single `user_id` is baked into the Composio MCP URL at creation time; every tool call acts as that user. Pre-authorize Notion + Maps in the Composio dashboard once.
 - **Tool permissions**: the agent is started with `permission_mode="bypassPermissions"` and `allowed_tools=["mcp__composio__*"]`, so only Composio-exposed tools are callable — no Bash/Read/Write.
+
+## Read-only finance connector
+
+`finance_connector/` is a deliberately separate service for financial
+planning data. It retains no database and never logs response bodies. Its
+security boundary is code, not a prompt:
+
+- every externally exposed route except `/health` requires a bearer secret;
+- every route is GET-only;
+- Trading 212 endpoints use an explicit read-resource allowlist;
+- Monzo/Amex use only UK Open Banking account-information resource paths;
+- payment initiation, withdrawals, orders, portfolio mutation, and account
+  management are absent and rejected.
+
+Run tests locally:
+
+```bash
+uv run python -m unittest finance_connector.test_app
+```
+
+Deploy it as a separate Fly app using `fly.finance.toml.example`; do not add
+the credentials to the main Iris app. Set secrets out-of-band with `flyctl
+secrets set`—never paste them into Telegram or store them in memory/history.
+
+Trading 212 can be connected directly with a key generated with only account,
+history, orders-read, and portfolio/positions-read permissions. Do not grant
+order placement. Monzo's production Open Banking interface requires a
+licensed Account Information Service Provider; Amex should be connected
+through the same provider. Put that provider's per-institution base URL and
+access token in `MONZO_OB_*` / `AMEX_OB_*`.
