@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import hmac
 import os
-from typing import Any
+import re
 
 import aiohttp
 from aiohttp import web
@@ -38,7 +38,10 @@ OB_READ_PREFIXES = (
     "/party",
     "/parties",
     "/products",
+    "/pots",
 )
+
+_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~-]+$")
 
 
 def _required(name: str) -> str:
@@ -114,8 +117,23 @@ async def trading212(request: web.Request) -> web.Response:
     )
 
 
+def _canonical_read_path(tail: str) -> str | None:
+    """Return a safe canonical upstream path, or None for ambiguous input."""
+    segments = tail.strip("/").split("/")
+    if not segments or any(
+        not segment
+        or segment in {".", ".."}
+        or not _SAFE_PATH_SEGMENT.fullmatch(segment)
+        for segment in segments
+    ):
+        return None
+    return "/" + "/".join(segments)
+
+
 def _valid_ob_path(tail: str) -> bool:
-    path = "/" + tail.strip("/")
+    path = _canonical_read_path(tail)
+    if path is None:
+        return False
     return any(path == prefix or path.startswith(prefix + "/") for prefix in OB_READ_PREFIXES)
 
 
@@ -124,14 +142,15 @@ async def open_banking(request: web.Request) -> web.Response:
     if provider not in {"monzo", "amex"}:
         raise web.HTTPNotFound()
     tail = request.match_info["tail"]
-    if not _valid_ob_path(tail):
+    path = _canonical_read_path(tail)
+    if path is None or not _valid_ob_path(tail):
         raise web.HTTPNotFound(text="account-information endpoint not allowlisted")
     prefix = provider.upper()
     base = _required(f"{prefix}_OB_BASE_URL").rstrip("/")
     token = _required(f"{prefix}_OB_ACCESS_TOKEN")
     return await _get_json(
         request,
-        f"{base}/{tail.strip('/')}",
+        f"{base}{path}",
         {"Authorization": f"Bearer {token}", "Accept": "application/json"},
     )
 
