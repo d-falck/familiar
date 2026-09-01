@@ -48,15 +48,31 @@ _TRANSIENT_STREAM_ERRORS = (
 )
 
 
+def _contains_transient_stream_error(value: object) -> bool:
+    """Detect provider/parser failures whether raised or returned as text."""
+    detail = str(value).lower()
+    return any(marker in detail for marker in _TRANSIENT_STREAM_ERRORS)
+
+
 def _user_error_message(exc: Exception) -> str:
     """Never leak low-level provider/HTTP parser errors into Telegram."""
-    detail = str(exc).lower()
-    if any(marker in detail for marker in _TRANSIENT_STREAM_ERRORS):
+    if _contains_transient_stream_error(exc):
         return (
             "That turn hit a temporary connection error. Please send it again; "
             "your previous data was not changed."
         )
     return "I hit an internal error on that turn. Please try again."
+
+
+def _sanitize_direct_reply(reply: object) -> str:
+    """Sanitize failures that a backend returned as normal assistant text."""
+    text = str(reply or "")
+    if _contains_transient_stream_error(text):
+        return (
+            "That turn hit a temporary connection error. Please send it again; "
+            "your previous data was not changed."
+        )
+    return text
 
 # Sent instead of the raw provider refusal string when a turn comes back as a
 # usage-policy block. The refusal itself is never written to history: the whole
@@ -492,6 +508,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             reply = _user_error_message(exc)
         finally:
             typing.cancel()
+
+        # Some provider failures are serialized into an otherwise successful
+        # assistant message rather than raised. Sanitize those too, before the
+        # reply reaches history, debug output, or Telegram.
+        sanitized_reply = _sanitize_direct_reply(reply)
+        if sanitized_reply != reply:
+            log.error(
+                "sanitized provider stream error returned as text chat=%s thread=%s",
+                chat.id,
+                thread_id,
+            )
+            error = error or RuntimeError("provider stream error returned as text")
+            reply = sanitized_reply
 
         # A provider usage-policy block can arrive either as the turn text or
         # wrapped in the exception we just formatted, so check both.
