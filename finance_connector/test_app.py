@@ -47,11 +47,31 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".xlsx") as handle:
             with zipfile.ZipFile(handle.name, "w") as archive:
                 archive.writestr(
+                    "xl/workbook.xml",
+                    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                    '<sheets><sheet name="Hello 👋" sheetId="1" r:id="rId1"/>'
+                    '<sheet name="Primary" sheetId="2" r:id="rId2"/></sheets></workbook>',
+                )
+                archive.writestr(
+                    "xl/_rels/workbook.xml.rels",
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+                    '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/>'
+                    '</Relationships>',
+                )
+                archive.writestr(
                     "xl/sharedStrings.xml",
                     f'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{shared}</sst>',
                 )
                 archive.writestr(
                     "xl/worksheets/sheet1.xml",
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Welcome</t></is></c>'
+                    '</row></sheetData></worksheet>',
+                )
+                archive.writestr(
+                    "xl/worksheets/sheet2.xml",
                     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
                     f'<sheetData><row r="1">{cells}</row><row r="2">{cells2}</row></sheetData></worksheet>',
                 )

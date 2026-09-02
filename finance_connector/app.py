@@ -48,6 +48,8 @@ OB_READ_PREFIXES = (
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~-]+$")
 _XLSX_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _EMMA_FIELDS = (
     "ID", "Date", "Amount", "Account", "Bank", "Currency", "Category",
     "Subcategory", "Type", "Tags", "Counterparty", "Custom Name",
@@ -139,14 +141,40 @@ def _read_emma_export(path: str) -> list[dict[str, str]]:
                 "".join(t.text or "" for t in item.iter(f"{{{_XLSX_NS}}}t"))
                 for item in root
             ]
-        sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
-        rows: list[dict[str, str]] = []
-        for row in sheet.findall(f".//{{{_XLSX_NS}}}row"):
-            values: dict[str, str] = {}
-            for cell in row.findall(f"{{{_XLSX_NS}}}c"):
-                column = "".join(ch for ch in cell.attrib["r"] if ch.isalpha())
-                values[column] = _xlsx_cell_value(cell, shared)
-            rows.append(values)
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        targets = {
+            rel.attrib["Id"]: rel.attrib["Target"]
+            for rel in relationships.findall(f"{{{_PKG_REL_NS}}}Relationship")
+        }
+        candidates: list[tuple[str, str]] = []
+        for item in workbook.findall(f".//{{{_XLSX_NS}}}sheet"):
+            rel_id = item.attrib[f"{{{_XLSX_REL_NS}}}id"]
+            target = targets[rel_id].lstrip("/")
+            if not target.startswith("xl/"):
+                target = "xl/" + target
+            candidates.append((item.attrib["name"], target))
+
+        # Emma Live Export currently uses a worksheet named "Primary" and may
+        # place a welcome/instructions tab first. Prefer Primary, but retain a
+        # header-based fallback so exports remain readable if Emma renames it.
+        candidates.sort(key=lambda item: item[0].casefold() != "primary")
+        sheet_rows: list[dict[str, str]] | None = None
+        for _, target in candidates:
+            sheet = ET.fromstring(archive.read(target))
+            candidate_rows: list[dict[str, str]] = []
+            for row in sheet.findall(f".//{{{_XLSX_NS}}}row"):
+                values: dict[str, str] = {}
+                for cell in row.findall(f"{{{_XLSX_NS}}}c"):
+                    column = "".join(ch for ch in cell.attrib["r"] if ch.isalpha())
+                    values[column] = _xlsx_cell_value(cell, shared)
+                candidate_rows.append(values)
+            if candidate_rows and set(_EMMA_FIELDS).issubset(candidate_rows[0].values()):
+                sheet_rows = candidate_rows
+                break
+        if sheet_rows is None:
+            raise ValueError("Emma export has no worksheet with transaction headers")
+        rows = sheet_rows
     if not rows:
         return []
     columns = {value: column for column, value in rows[0].items()}
