@@ -706,7 +706,7 @@ async def _run() -> None:
     model = (
         os.environ.get("CODEX_MODEL", "gpt-5.6-sol")
         if backend == "codex"
-        else os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8[1m]")
+        else os.environ.get("ANTHROPIC_MODEL", "claude-fable-5-1")
     )
     log.info("agent backend=%s model=%s", backend, model)
 
