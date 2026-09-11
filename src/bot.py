@@ -54,12 +54,27 @@ def _contains_transient_stream_error(value: object) -> bool:
     return any(marker in detail for marker in _TRANSIENT_STREAM_ERRORS)
 
 
+_OVERSIZED_MESSAGE_ERRORS = (
+    "exceeded maximum buffer size",
+    "exceeds limit",
+)
+
+
 def _user_error_message(exc: Exception) -> str:
     """Never leak low-level provider/HTTP parser errors into Telegram."""
+    detail = str(exc).lower()
     if _contains_transient_stream_error(exc):
         return (
             "That turn hit a temporary connection error. Please send it again; "
             "your previous data was not changed."
+        )
+    if any(marker in detail for marker in _OVERSIZED_MESSAGE_ERRORS):
+        # SDK buffer overflow on one huge tool_result (typically a full-res
+        # image read). Say what actually happened instead of "internal error".
+        return (
+            "That turn pulled in a single result too large for my pipeline "
+            "(usually a big image/file read) and got cut off. Nothing was "
+            "changed — try again, or ask me to work from a smaller copy."
         )
     return "I hit an internal error on that turn. Please try again."
 

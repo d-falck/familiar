@@ -38,6 +38,17 @@ log = logging.getLogger(__name__)
 # still reaping a genuinely stuck subprocess. Override via env if needed.
 IDLE_TIMEOUT_SECONDS = int(os.environ.get("AGENT_IDLE_TIMEOUT_SECONDS", "300"))
 
+# Largest single NDJSON message the SDK will accept from the CLI. The SDK's
+# default is 1MB, which ONE tool_result can exceed — a Read on a ~700KB JPEG
+# comes back as ~1MB of base64 — and the SDK then raises
+# SDKJSONDecodeError("JSON message exceeded maximum buffer size ..."), which
+# kills the whole turn ("I hit an internal error on that turn"). 2026-09-11:
+# three consecutive turns in the storage topic died exactly this way while
+# inspecting full-res box photos. 32MB comfortably covers any image/file read.
+MAX_BUFFER_BYTES = int(
+    os.environ.get("AGENT_MAX_BUFFER_BYTES", str(32 * 1024 * 1024))
+)
+
 
 async def _allow_all(*_args, **_kwargs) -> PermissionResultAllow:
     return PermissionResultAllow()
@@ -73,6 +84,9 @@ async def run(
         # message). StreamEvents aren't AssistantMessages, so the receive loop
         # below ignores them as pure heartbeats — no duplicate streamed text.
         include_partial_messages=True,
+        # See MAX_BUFFER_BYTES: the 1MB SDK default aborts a turn on any
+        # large tool_result (image reads).
+        max_buffer_size=MAX_BUFFER_BYTES,
         stderr=lambda line: log.error("claude stderr: %s", line),
     )
 
