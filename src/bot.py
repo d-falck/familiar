@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from telegram import MessageEntity, ReactionTypeEmoji, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+import model_switch
 from agent import respond
 from history import History
 from refusal import is_refusal
@@ -60,13 +61,48 @@ _OVERSIZED_MESSAGE_ERRORS = (
 )
 
 
-def _user_error_message(exc: Exception) -> str:
+# Provider usage/quota exhaustion. Distinct from every other failure mode: the
+# turn is fine, the *model* is unavailable, and the fix is to switch models —
+# which the agent itself cannot do for you, because it's the unavailable thing.
+# So these get a pointer to the /model command, which runs without the agent.
+_LIMIT_MARKERS = (
+    "usage limit reached",
+    "reached your usage limit",
+    "switch to another model to continue",
+    "credit balance is too low",
+    "insufficient_quota",
+    "exceeded your current quota",
+)
+_LIMIT_PATTERN = re.compile(r"reached your \w[\w.\- ]{0,30} limit", re.IGNORECASE)
+
+def _model_switch_hint(current_model: str | None = None) -> str:
+    """Point at the /model command, naming a model that ISN'T the one that
+    just hit a limit."""
+    alternative = model_switch.suggest_alternative(current_model)
+    return (
+        "\n\n⚙️ Looks like a model/quota limit. You can switch me without "
+        f"needing me: send `/model {alternative}` (or `/model` to see every "
+        "option, `/model reset` to go back to the default)."
+    )
+
+
+def _is_limit_message(value: object) -> bool:
+    detail = str(value).lower()
+    return any(m in detail for m in _LIMIT_MARKERS) or bool(_LIMIT_PATTERN.search(detail))
+
+
+def _user_error_message(exc: Exception, current_model: str | None = None) -> str:
     """Never leak low-level provider/HTTP parser errors into Telegram."""
     detail = str(exc).lower()
     if _contains_transient_stream_error(exc):
         return (
             "That turn hit a temporary connection error. Please send it again; "
             "your previous data was not changed."
+        )
+    if _is_limit_message(exc):
+        return (
+            "That turn was blocked by a model usage/quota limit, not by "
+            "anything you asked for." + _model_switch_hint(current_model)
         )
     if any(marker in detail for marker in _OVERSIZED_MESSAGE_ERRORS):
         # SDK buffer overflow on one huge tool_result (typically a full-res
@@ -266,6 +302,90 @@ def _load_session_context(
         if base:
             return base + [{"role": "user", "content": _DM_CONTEXT_SEP}] + own
     return own
+
+
+async def on_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/model` — read or change the model/provider with no agent turn.
+
+    This is deliberately a plain command handler: when a provider usage limit
+    is what's broken, the agent can't be asked to fix it, because the agent is
+    what's unavailable. So the switch is pure Python — no LLM call, no tool
+    use, no history write — that rewrites the shared respond_cfg in place and
+    persists the choice. Every path (chat turns, scheduler, webhook) holds a
+    reference to that same dict, so the next turn anywhere uses the new model.
+
+    Usage:
+      /model                      show current model and the options
+      /model opus                 switch by alias
+      /model claude-opus-4-5      switch by raw model id (backend inferred)
+      /model codex gpt-5.2        switch backend + model explicitly
+      /model reset                back to the deploy default
+    """
+    message = update.effective_message
+    bot_data = context.application.bot_data
+    cfg: dict = bot_data["cfg"]
+    defaults: tuple[str, str] = bot_data["model_defaults"]
+    override_path: Path = bot_data["model_override_path"]
+    args = [a for a in (context.args or []) if a.strip()]
+
+    async def reply(text: str) -> None:
+        await send_markdown(
+            lambda body, pm: message.reply_text(body, parse_mode=pm), text
+        )
+
+    if not args:
+        await reply(model_switch.format_status(cfg, defaults))
+        return
+
+    resetting = args[0].lower() in model_switch.RESET_WORDS
+    if resetting:
+        backend, model = defaults
+    else:
+        try:
+            backend, model = model_switch.resolve(args)
+        except ValueError as exc:
+            await reply(f"⚠️ {exc}\n\nSend `/model` to see the options.")
+            return
+
+    previous = f"{cfg['backend']}/{cfg['model']}"
+    cfg["backend"] = backend
+    cfg["model"] = model
+
+    # Persist AFTER switching: a read-only/full volume must not cost you the
+    # switch itself, it only costs you surviving a restart — so say so and
+    # carry on rather than failing the command.
+    warnings = []
+    try:
+        if resetting:
+            model_switch.clear_override(override_path)
+        else:
+            model_switch.save_override(override_path, backend, model)
+    except Exception:
+        log.exception("failed to persist model override to %s", override_path)
+        warnings.append(
+            "couldn't save this choice to disk, so a restart will revert it"
+        )
+
+    if backend == "codex" and not os.environ.get("OPENAI_API_KEY"):
+        warnings.append("`OPENAI_API_KEY` is unset, so Codex turns will fail")
+
+    log.info(
+        "model switched %s -> %s/%s by %s in chat=%s",
+        previous,
+        backend,
+        model,
+        message.from_user.username if message.from_user else "?",
+        message.chat_id,
+    )
+
+    suffix = "" if resetting else " Send `/model reset` to go back to the default."
+    text = f"✅ Now running `{model}` on the `{backend}` backend."
+    if resetting:
+        text += " (deploy default)"
+    text += suffix
+    if warnings:
+        text += "\n\n⚠️ " + "; ".join(warnings) + "."
+    await reply(text)
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -520,7 +640,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             log.exception("respond failed")
             error = exc
-            reply = _user_error_message(exc)
+            reply = _user_error_message(exc, cfg.get("model"))
         finally:
             typing.cancel()
 
@@ -560,16 +680,29 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             reply = EMPTY_REPLY_FALLBACK
 
+        # A subscription/quota limit usually arrives as the turn's own reply
+        # text ("You've reached your Fable limit"), not as an exception, so the
+        # /model pointer has to be appended here too. Not persisted to history:
+        # the hint is about right now, and replaying it every turn is noise.
+        sent_reply = reply
+        if not error and not refused and _is_limit_message(reply):
+            log.warning(
+                "model usage limit returned as reply text chat=%s thread=%s",
+                chat.id,
+                thread_id,
+            )
+            sent_reply = reply + _model_switch_hint(cfg.get("model"))
+
         if not refused:
             history.add_assistant(chat.id, reply, thread_id=thread_id)
         await set_reaction(REACTION_ERROR if error or refused else None)
         await send_debug(f"⚠️ {error}" if error else f"{'⚠️' if refused else '✅'} {reply}")
         # If the final reply is identical to the last text block we already
         # streamed, skip it — no point duplicating the message.
-        if error or reply != last_streamed_text["value"]:
+        if error or sent_reply != last_streamed_text["value"]:
             await send_markdown(
                 lambda body, pm: message.reply_text(body, parse_mode=pm),
-                reply,
+                sent_reply,
             )
         # Mark fully handled only now (turn done + reply sent) so a redelivery
         # after a restart can't fire a duplicate, while an interrupted turn
@@ -717,13 +850,13 @@ async def _run() -> None:
         }
     }
 
-    backend = os.environ.get("AGENT_BACKEND", "claude").lower()
-    model = (
+    default_backend = os.environ.get("AGENT_BACKEND", "claude").lower()
+    default_model = (
         os.environ.get("CODEX_MODEL", "gpt-5.6-sol")
-        if backend == "codex"
+        if default_backend == "codex"
         else os.environ.get("ANTHROPIC_MODEL", "claude-fable-5-1")
     )
-    log.info("agent backend=%s model=%s", backend, model)
+    backend, model = default_backend, default_model
 
     # Workspace groups: chats where she answers every message (no @-mention
     # needed) and treats forum topics as parallel sessions.
@@ -734,6 +867,21 @@ async def _run() -> None:
     }
 
     history_path = os.environ.get("HISTORY_DB_PATH", "./history.sqlite")
+    # A /model switch made in chat persists beside the history DB (on the Fly
+    # volume in prod), so it outlives the restart that follows it.
+    model_override_path = model_switch.override_path(history_path)
+    override = model_switch.load_override(model_override_path)
+    if override:
+        backend, model = override
+        log.info("applying persisted model override: %s/%s", backend, model)
+    log.info(
+        "agent backend=%s model=%s (default %s/%s)",
+        backend,
+        model,
+        default_backend,
+        default_model,
+    )
+
     respond_cfg = {
         "backend": backend,
         "mcp_servers": mcp_servers,
@@ -759,6 +907,8 @@ async def _run() -> None:
         .build()
     )
     app.bot_data["cfg"] = respond_cfg
+    app.bot_data["model_defaults"] = (default_backend, default_model)
+    app.bot_data["model_override_path"] = model_override_path
     app.bot_data["history"] = history
     app.bot_data["debug_chat_id"] = os.environ.get("DEBUG_CHAT_ID")
     app.bot_data["attachments_dir"] = Path(
@@ -803,6 +953,7 @@ async def _run() -> None:
         await context.bot.send_message(chat_id=chat.id, text=f"chat id: {chat.id}")
 
     app.add_handler(CommandHandler("id", on_id))
+    app.add_handler(CommandHandler(["model", "models"], on_model))
     app.add_handler(
         MessageHandler(
             (filters.ChatType.GROUPS | filters.ChatType.PRIVATE)

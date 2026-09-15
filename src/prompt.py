@@ -252,6 +252,22 @@ def render_transcript(messages: list[dict]) -> str:
     return f"<transcript>\n{body}\n</transcript>"
 
 
+RUNTIME_MODEL_SECTION = """
+
+## Which model you're running on
+
+Right now you are running on `{model}` via the `{backend}` backend. You cannot \
+change that yourself — it's owned by the process, not by any tool you have. If \
+the user wants a different model or provider (usually because the current one \
+hit a usage or quota limit), point them at the Telegram command: `/model` on \
+its own lists the options, `/model <name>` switches (e.g. `/model opus`), and \
+`/model reset` goes back to the deploy default. That command is plain code \
+with no model in the loop, so it still works when your own model is the thing \
+that's unavailable — which is exactly when they'll need it. Don't offer to \
+switch for them, and don't claim to be a model other than the one named above.
+"""
+
+
 def build_system_prompt(
     *,
     persona_path: str,
@@ -260,6 +276,8 @@ def build_system_prompt(
     self_repo_dir: str | None = None,
     self_deploy_cmd: str | None = None,
     workspace_chat_ids: list[int] | None = None,
+    backend: str | None = None,
+    model: str | None = None,
 ) -> str:
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         persona=load_persona(persona_path),
@@ -276,4 +294,6 @@ def build_system_prompt(
             self_repo_dir=self_repo_dir,
             self_deploy_cmd=self_deploy_cmd or "(deploy command not configured)",
         )
+    if model:
+        prompt += RUNTIME_MODEL_SECTION.format(model=model, backend=backend or "claude")
     return prompt

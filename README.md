@@ -15,6 +15,33 @@ Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent S
 - **bot.py** — python-telegram-bot long-polling, listens in groups, filters to messages that @mention or reply to the bot. Persists every group message to SQLite.
 - **history.py** — per-chat SQLite message log. Replays the full conversation as a transcript on each turn.
 - **claude_client.py** — wraps `claude_agent_sdk.query()` with one HTTP MCP server pointing at Composio. Agent SDK handles the tool-call loop.
+- **model_switch.py** — the `/model` command's registry, validation and persistence. Deliberately agent-free (see below).
+
+## Switching model / provider from chat
+
+`/model` changes which model (and which backend) answers, with **no agent turn
+involved** — it's a plain Telegram command handler, so it still works when the
+model itself is the thing that's broken ("You've reached your Fable limit.
+Switch to another model to continue"). Asking Iris to switch in that state
+can't work; the thing you'd be asking is the thing that's unavailable.
+
+| Command | Effect |
+|---|---|
+| `/model` | Show the running model/backend and the available aliases |
+| `/model opus` | Switch by alias (`fable`, `opus`, `sonnet`, `haiku`, `codex`, `gpt`) |
+| `/model claude-opus-4-5` | Switch by raw model id; backend inferred from the prefix |
+| `/model codex gpt-5.2` | Switch backend and model explicitly |
+| `/model reset` | Back to the deploy default (`AGENT_BACKEND` + `ANTHROPIC_MODEL`/`CODEX_MODEL`) |
+
+The choice is written to `model_override.json` beside the history DB (so on Fly
+it lives on the `/data` volume and survives restarts and redeploys), and it
+rewrites the shared `respond_cfg` in place, so chat turns, the scheduler and the
+webhook all pick it up on their next turn. Bad input never changes the running
+model. Switching to `codex` without `OPENAI_API_KEY` set warns you rather than
+failing silently on the next turn.
+
+When a turn does die on a usage or quota limit, the reply carries a pointer to
+`/model` naming an alternative — never the model that just ran out.
 
 ## Env vars
 
@@ -26,8 +53,8 @@ Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent S
 | `COMPOSIO_API_KEY` | yes | read by the `composio` SDK at startup |
 | `COMPOSIO_USER_ID` | yes | your Composio user id (e.g. `user_7svs9s`) — the bot creates a Tool Router session for this user at startup, which exposes all your connected toolkits |
 | `AGENT_BACKEND` | no | `claude` (default, Claude Agent SDK) or `codex` (OpenAI Codex CLI). Both share the same Composio MCP server and system prompt. |
-| `ANTHROPIC_MODEL` | no | default `claude-fable-5-1` (used when backend is `claude`) |
-| `CODEX_MODEL` | no | default `gpt-5.6-sol` (used when backend is `codex`; reuses `OPENAI_API_KEY`) |
+| `ANTHROPIC_MODEL` | no | default `claude-fable-5-1` (used when backend is `claude`). A `/model` switch made in chat overrides this until `/model reset`. |
+| `CODEX_MODEL` | no | default `gpt-5.6-sol` (used when backend is `codex`; reuses `OPENAI_API_KEY`). Also overridable via `/model`. |
 | `HISTORY_DB_PATH` | no | default `./history.sqlite`; in Docker/Fly, `/data/history.sqlite` |
 | `MAX_AGENT_TURNS` | no | default `12` |
 
@@ -37,6 +64,12 @@ Telegram group-chat bot that forwards @mentions to Claude via the Claude Agent S
 cp .env.example .env     # fill in values
 uv sync
 uv run python bot.py
+```
+
+## Tests
+
+```bash
+uv run python -m unittest discover -s src -p 'test_*.py'
 ```
 
 ## ElevenLabs Iris agent-as-code
@@ -134,6 +167,13 @@ curl -fsSL https://claude.ai/install.sh | bash
 2. Disable "group privacy" for the bot via @BotFather → Bot Settings → Group Privacy → Turn off. Otherwise it only sees commands, not plain @mentions.
 3. Add the bot to your group.
 4. Mention it: `@your_bot_name what's on my Notion today?`
+5. Optional: register the commands with @BotFather → Edit Commands so they
+   autocomplete, e.g.
+
+   ```
+   model - show or switch the model/provider
+   id - show this chat's id
+   ```
 
 ## Deploying to Fly.io
 
