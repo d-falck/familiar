@@ -1,0 +1,77 @@
+# Deploy Iris to Fly on every merge to main.
+#
+# Exists because the previous deploy path was circular: Iris deploys herself,
+# but a model usage limit takes away the very turn she'd need to do it. CI has
+# no such dependency, so a merge is enough to ship.
+#
+# Requires one repository secret: FLY_API_TOKEN. Create an app-scoped deploy
+# token with `flyctl tokens create deploy -a iris-familiar`, then add it under
+# Settings > Secrets and variables > Actions.
+
+name: Deploy Iris
+
+on:
+  push:
+    branches: [main]
+    # Docs and the separate finance app don't affect the running bot.
+    paths-ignore:
+      - "README.md"
+      - "finance_connector/**"
+      - "fly.finance.toml*"
+      - "Dockerfile.finance"
+  workflow_dispatch:
+
+# Never let two deploys race; a half-applied machine update is worse than a
+# queued one. Deploys are not cancelled mid-flight.
+concurrency:
+  group: deploy-iris
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Bot tests
+        run: uv run --no-dev python -m unittest discover -s src -p 'test_*.py' -v
+
+      - name: Finance connector tests
+        run: uv run --no-dev python -m unittest finance_connector.test_app -v
+
+  deploy:
+    name: Deploy to Fly
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail with a readable message rather than a cryptic flyctl auth error
+      # when the secret hasn't been added yet.
+      - name: Verify Fly token is configured
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::FLY_API_TOKEN repository secret is not set. Create an app-scoped deploy token with 'flyctl tokens create deploy -a iris-familiar' and add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Install flyctl
+        run: |
+          curl -L https://fly.io/install.sh | sh
+          echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy -c fly.iris.toml -a iris-familiar --ha=false --remote-only
