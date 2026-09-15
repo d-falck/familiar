@@ -39,6 +39,8 @@ async def respond(
         self_repo_dir=self_repo_dir,
         self_deploy_cmd=self_deploy_cmd,
         workspace_chat_ids=workspace_chat_ids,
+        backend=backend,
+        model=model,
     )
     callbacks = dict(
         on_tool_use=on_tool_use,
