@@ -19,8 +19,31 @@ import model_switch  # noqa: E402
 
 class ResolveTests(unittest.TestCase):
     def test_alias(self):
-        self.assertEqual(model_switch.resolve(["opus"]), ("claude", "claude-opus-5"))
-        self.assertEqual(model_switch.resolve(["OPUS"]), ("claude", "claude-opus-5"))
+        self.assertEqual(model_switch.resolve(["opus"]), ("claude", "claude-opus-5-5"))
+        self.assertEqual(model_switch.resolve(["OPUS"]), ("claude", "claude-opus-5-5"))
+
+    def test_family_aliases_point_at_the_current_generation(self):
+        # A family alias must track the newest model in its line; a version
+        # alias must stay pinned. Catches the "updated the default but left
+        # /model pointing at last generation" drift.
+        for alias, expected in (
+            ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-sonnet-5-5"),
+            ("haiku", "claude-haiku-5-5"),
+            ("fable", "claude-fable-5-1"),
+            ("opus5", "claude-opus-5"),
+            ("haiku4.5", "claude-haiku-4-5"),
+        ):
+            with self.subTest(alias=alias):
+                self.assertEqual(model_switch.resolve([alias])[1], expected)
+
+    def test_every_listed_alias_exists_and_is_annotated(self):
+        # `/model` renders these two tuples; a name in either that isn't in
+        # ALIASES would KeyError inside the command handler.
+        for alias in model_switch.PRIMARY_ALIASES + model_switch.OLDER_ALIASES:
+            with self.subTest(alias=alias):
+                self.assertIn(alias, model_switch.ALIASES)
+                self.assertIn(alias, model_switch.NOTES)
 
     def test_raw_model_id_infers_backend(self):
         self.assertEqual(
@@ -124,12 +147,12 @@ class CommandTests(unittest.TestCase):
         # The scheduler and webhook hold a reference to this same dict, so an
         # in-place update is what makes the switch global.
         out = _run_command(self.bot_data, ["opus"])
-        self.assertEqual(self.cfg["model"], "claude-opus-5")
+        self.assertEqual(self.cfg["model"], "claude-opus-5-5")
         self.assertEqual(self.cfg["backend"], "claude")
-        self.assertIn("`claude-opus-5`", out)
+        self.assertIn("`claude-opus-5-5`", out)
         self.assertEqual(
             model_switch.load_override(self.override_path),
-            ("claude", "claude-opus-5"),
+            ("claude", "claude-opus-5-5"),
         )
 
     def test_reset_restores_default_and_drops_the_file(self):
@@ -182,6 +205,30 @@ class LimitDetectionTests(unittest.TestCase):
             bot_module._is_limit_message("I hit an internal error on that turn.")
         )
 
+    def test_a_real_answer_quoting_a_quota_error_is_not_a_limit_reply(self):
+        # Regression: `_LIMIT_MARKERS` match anywhere, so a genuine turn that
+        # diagnosed an OpenAI billing error got classified as a provider
+        # non-answer — which drops it from history on the direct path and
+        # silences it entirely on the proactive ones. Only the bare notice is.
+        from refusal import is_limit_message, is_limit_reply, undeliverable_reason
+
+        real_answer = (
+            "Figured it out — and it's not a bug in my code. I reproduced the "
+            "failure by running the saved voice note back through Whisper. The "
+            "error is `429 insufficient_quota — You exceeded your current "
+            "quota, please check your plan and billing details.` So the key is "
+            "valid but the OpenAI account behind it has run out of credit. "
+            "The fix is on your side: top up at platform.openai.com → Billing, "
+            "and voice notes will start transcribing again automatically."
+        )
+        self.assertTrue(is_limit_message(real_answer))  # matches, as designed
+        self.assertFalse(is_limit_reply(real_answer))  # but isn't the notice
+        self.assertIsNone(undeliverable_reason(real_answer))
+
+        notice = "You've reached your Fable limit. Switch to another model to continue."
+        self.assertTrue(is_limit_reply(notice))
+        self.assertEqual(undeliverable_reason(notice), "usage-limit")
+
     def test_limit_exception_gets_the_switch_hint(self):
         import bot as bot_module
 
@@ -194,10 +241,12 @@ class LimitDetectionTests(unittest.TestCase):
         import bot as bot_module
 
         text = bot_module._user_error_message(
-            RuntimeError("Claude usage limit reached"), "claude-opus-5"
+            RuntimeError("Claude usage limit reached"), "claude-opus-5-5"
         )
         self.assertNotIn("/model opus", text)
-        self.assertIn("/model sonnet", text)
+        # Next in the fallback order, and on a separate quota pool from Opus,
+        # so it's the one that can actually rescue a maxed-out Opus.
+        self.assertIn("/model fable", text)
 
 
 class SystemPromptTests(unittest.TestCase):

@@ -22,7 +22,13 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 import model_switch
 from agent import respond
 from history import History
-from refusal import is_refusal
+from refusal import (
+    is_backend_error,
+    is_limit_message,
+    is_limit_reply,
+    is_refusal,
+    undeliverable_reason,
+)
 from silence import SILENCE_INSTRUCTION, is_placeholder_reply, is_silent
 from telegram_md import send_markdown
 from voice import transcribe as transcribe_voice
@@ -61,20 +67,12 @@ _OVERSIZED_MESSAGE_ERRORS = (
 )
 
 
-# Provider usage/quota exhaustion. Distinct from every other failure mode: the
-# turn is fine, the *model* is unavailable, and the fix is to switch models —
-# which the agent itself cannot do for you, because it's the unavailable thing.
-# So these get a pointer to the /model command, which runs without the agent.
-_LIMIT_MARKERS = (
-    "usage limit reached",
-    "reached your usage limit",
-    "switch to another model to continue",
-    "credit balance is too low",
-    "insufficient_quota",
-    "exceeded your current quota",
-)
-_LIMIT_PATTERN = re.compile(r"reached your \w[\w.\- ]{0,30} limit", re.IGNORECASE)
-
+# Provider usage/quota exhaustion is detected in `refusal.py` so that the
+# proactive paths (scheduler, webhook) share one definition with this one.
+# Distinct from every other failure mode: the turn is fine, the *model* is
+# unavailable, and the fix is to switch models — which the agent itself cannot
+# do for you, because it's the unavailable thing. So on a direct turn these get
+# a pointer to the /model command, which runs without the agent.
 def _model_switch_hint(current_model: str | None = None) -> str:
     """Point at the /model command, naming a model that ISN'T the one that
     just hit a limit."""
@@ -86,9 +84,7 @@ def _model_switch_hint(current_model: str | None = None) -> str:
     )
 
 
-def _is_limit_message(value: object) -> bool:
-    detail = str(value).lower()
-    return any(m in detail for m in _LIMIT_MARKERS) or bool(_LIMIT_PATTERN.search(detail))
+_is_limit_message = is_limit_message
 
 
 def _user_error_message(exc: Exception, current_model: str | None = None) -> str:
@@ -685,7 +681,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # /model pointer has to be appended here too. Not persisted to history:
         # the hint is about right now, and replaying it every turn is noise.
         sent_reply = reply
-        if not error and not refused and _is_limit_message(reply):
+        limited = not error and not refused and is_limit_reply(reply)
+        if limited:
             log.warning(
                 "model usage limit returned as reply text chat=%s thread=%s",
                 chat.id,
@@ -693,7 +690,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             sent_reply = reply + _model_switch_hint(cfg.get("model"))
 
-        if not refused:
+        # Keep provider non-answers OUT of history even on the direct path. The
+        # user still gets told (they're waiting on us), but storing the raw
+        # string costs context forever and re-feeds it to the classifier on
+        # every later turn. A 24%-of-the-DB pile of these built up before this.
+        if not refused and not limited and not is_backend_error(reply):
             history.add_assistant(chat.id, reply, thread_id=thread_id)
         await set_reaction(REACTION_ERROR if error or refused else None)
         await send_debug(f"⚠️ {error}" if error else f"{'⚠️' if refused else '✅'} {reply}")
@@ -792,10 +793,16 @@ async def _run_scheduler(
             messages = history.load_as_messages(chat_id)
             messages.append({"role": "user", "content": prompt})
             reply = await respond(messages, **respond_cfg)
-            if is_refusal(reply):
-                # Never persist or send a usage-policy block — a stored one is
-                # replayed to the classifier on every later turn (refusal.py).
-                log.error("provider refusal on scheduled tick reply=%r", reply)
+            undeliverable = undeliverable_reason(reply)
+            if undeliverable:
+                # Never persist or send a provider non-answer: a stored one is
+                # replayed to the classifier on every later turn (refusal.py),
+                # and on a silent path there is nobody waiting on an apology.
+                log.error(
+                    "scheduled tick produced no sendable reply (%s): %r",
+                    undeliverable,
+                    (reply or "")[:300],
+                )
             elif not is_silent(reply):
                 history.add_assistant(chat_id, reply)
                 await send_markdown(

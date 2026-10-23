@@ -25,7 +25,7 @@ import aiohttp
 from aiohttp import web
 
 from prompt import build_voice_prompt, load_memory, render_recent_context
-from refusal import is_refusal
+from refusal import undeliverable_reason
 from silence import SILENCE_INSTRUCTION, is_silent
 from telegram_md import send_markdown
 
@@ -158,10 +158,17 @@ def build_app(
             log.exception("trigger respond failed")
             reply = f"⚠️ trigger handler failed: {exc}"
 
-        if is_refusal(reply):
-            # Never persist or send a usage-policy block — a stored one is
-            # replayed to the classifier on every later turn (refusal.py).
-            log.error("provider refusal on trigger path reply=%r", reply)
+        undeliverable = undeliverable_reason(reply)
+        if undeliverable:
+            # Never persist or send a provider non-answer (policy block, quota
+            # limit, raw harness error): a stored one is replayed to the
+            # classifier on every later turn (refusal.py), and this path is
+            # default-silent, so there is nobody waiting on an apology.
+            log.error(
+                "trigger produced no sendable reply (%s): %r",
+                undeliverable,
+                (reply or "")[:300],
+            )
         elif not is_silent(reply):
             # Persist the reply so the user can refer to it in future turns,
             # but as a single terse assistant row (not the original event).
@@ -213,8 +220,13 @@ def build_app(
         except Exception as exc:
             log.exception("voice dispatch respond failed")
             reply = f"⚠️ voice dispatch failed: {exc}"
-        if is_refusal(reply):
-            log.error("provider refusal on voice dispatch reply=%r", reply)
+        undeliverable = undeliverable_reason(reply)
+        if undeliverable:
+            log.error(
+                "voice dispatch produced no sendable reply (%s): %r",
+                undeliverable,
+                (reply or "")[:300],
+            )
         elif not is_silent(reply):
             history.add_assistant(target_chat_id, reply)
             try:
