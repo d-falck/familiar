@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from telegram import MessageEntity, ReactionTypeEmoji, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+import context_window
+import fast_path
 import model_switch
 from agent import respond
 from history import History
@@ -287,14 +289,29 @@ def _load_session_context(
 ) -> list[dict]:
     """Transcript for a session. Forum-topic sessions in a workspace group are
     prefixed with the main DM history so they share that background on top of
-    their own thread; the DM and ordinary chats just get their own."""
+    their own thread; the DM and ordinary chats just get their own.
+
+    Both halves are windowed (see context_window): replaying 1,100+ messages
+    every turn is what made a one-line exchange cost a ~132k-token prefill,
+    and a topic turn paid that twice over. The full history stays queryable in
+    SQLite, so trimming costs reach, not recall."""
     own = history.load_as_messages(chat_id, thread_id)
+    # A conversational no-op needs recency, not the archive.
+    budget = (
+        context_window.fast_budget()
+        if fast_path.is_chitchat(own)
+        else context_window.session_budget()
+    )
+    own = context_window.trim(own, budget_chars=budget)
     if (
         main_dm_chat_id
         and chat_id in workspace_chat_ids
         and not (chat_id == main_dm_chat_id and thread_id == 0)
     ):
-        base = history.load_as_messages(main_dm_chat_id, 0)
+        base = context_window.trim(
+            history.load_as_messages(main_dm_chat_id, 0),
+            budget_chars=context_window.background_budget(),
+        )
         if base:
             return base + [{"role": "user", "content": _DM_CONTEXT_SEP}] + own
     return own
@@ -790,7 +807,7 @@ async def _run_scheduler(
                     f"deadline with real cost. Otherwise stay silent.\n\n"
                     f"{SILENCE_INSTRUCTION}"
                 )
-            messages = history.load_as_messages(chat_id)
+            messages = context_window.trim(history.load_as_messages(chat_id))
             messages.append({"role": "user", "content": prompt})
             reply = await respond(messages, **respond_cfg)
             undeliverable = undeliverable_reason(reply)

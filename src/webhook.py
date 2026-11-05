@@ -24,6 +24,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
+import context_window
 from prompt import build_voice_prompt, load_memory, render_recent_context
 from refusal import undeliverable_reason
 from silence import SILENCE_INSTRUCTION, is_silent
@@ -149,7 +150,7 @@ def build_app(
         # plus this one-off event as the final user turn. We do NOT call
         # history.add_user on the raw event — it would bloat the transcript
         # for future turns and quickly blow past the context window.
-        messages = history.load_as_messages(target_chat_id)
+        messages = context_window.trim(history.load_as_messages(target_chat_id))
         messages.append({"role": "user", "content": event_text})
 
         try:
@@ -213,7 +214,7 @@ def build_app(
 
     async def _process_voice_dispatch(instruction: str) -> None:
         log.info("dispatching voice-call task: %s", instruction[:120])
-        messages = history.load_as_messages(target_chat_id)
+        messages = context_window.trim(history.load_as_messages(target_chat_id))
         messages.append({"role": "user", "content": f"[voice call dispatch] {instruction}"})
         try:
             reply = await respond_fn(messages, **respond_cfg)

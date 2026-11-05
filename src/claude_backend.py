@@ -25,6 +25,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+import fast_path
 from prompt import render_transcript
 
 log = logging.getLogger(__name__)
@@ -65,7 +66,15 @@ async def run(
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_thinking: Callable[[str], Awaitable[None]] | None = None,
     on_tool_result: Callable[[str, str], Awaitable[None]] | None = None,
+    effort: str | None = None,
 ) -> str:
+    # Effort is per-turn, not per-deploy: a conversational no-op ("hi",
+    # "thanks") gets the fast budget so short exchanges feel like a chat
+    # instead of a batch job, everything else keeps the full budget. See
+    # fast_path for why this is an explicit allowlist and not a heuristic.
+    turn_effort = effort or fast_path.effort_for(messages)
+    if turn_effort != fast_path.NORMAL_EFFORT:
+        log.info("fast-path turn: effort=%s", turn_effort)
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         model=model,
@@ -77,7 +86,7 @@ async def run(
         # Opus 4.7+ rejects the legacy `enabled` thinking config; it requires
         # `adaptive` + a top-level `effort` knob.
         thinking={"type": "adaptive"},
-        effort="xhigh",
+        effort=turn_effort,
         # Drip StreamEvent heartbeats during long reasoning/generation so the
         # idle watchdog isn't tripped mid-thought (xhigh effort can spend
         # minutes on a single block before it's delivered as a complete

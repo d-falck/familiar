@@ -31,6 +31,7 @@ async def respond(
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_thinking: Callable[[str], Awaitable[None]] | None = None,
     on_tool_result: Callable[[str, str], Awaitable[None]] | None = None,
+    effort: str | None = None,
 ) -> str:
     system_prompt = build_system_prompt(
         persona_path=persona_path,
@@ -64,5 +65,6 @@ async def respond(
         model=model,
         mcp_servers=mcp_servers,
         max_turns=max_turns,
+        effort=effort,
         **callbacks,
     )
