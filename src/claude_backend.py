@@ -75,8 +75,14 @@ async def run(
     turn_effort = effort or fast_path.effort_for(messages)
     if turn_effort != fast_path.NORMAL_EFFORT:
         log.info("fast-path turn: effort=%s", turn_effort)
+    # Do not pass the full Iris prompt as Claude Code's --system-prompt CLI
+    # argument. Memory alone can exceed 120KB; combined with the process
+    # environment this can cross Linux ARG_MAX and fail before Claude starts
+    # with ``OSError: [Errno 7] Argument list too long``. The SDK sends query
+    # content over stdin, so put the large prompt there and keep the actual
+    # CLI argument deliberately tiny.
     options = ClaudeAgentOptions(
-        system_prompt=system_prompt,
+        system_prompt="You are Iris. Follow the complete instructions supplied in the user payload.",
         model=model,
         mcp_servers=mcp_servers,
         allowed_tools=["mcp__composio__*", "WebFetch", "WebSearch", "Bash"],
@@ -100,7 +106,10 @@ async def run(
     )
 
     async with ClaudeSDKClient(options=options) as client:
-        await client.query(render_transcript(messages))
+        await client.query(
+            f"<iris_system_prompt>\n{system_prompt}\n</iris_system_prompt>\n\n"
+            f"{render_transcript(messages)}"
+        )
         stream = client.receive_response().__aiter__()
         while True:
             try:
