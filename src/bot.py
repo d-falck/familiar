@@ -152,6 +152,107 @@ TRIAGE_INSTRUCTION = (
     f"{SILENCE_INSTRUCTION}"
 )
 
+MACRO_PROMPT_HOUR = int(os.environ.get("MACRO_PROMPT_HOUR", "20"))
+MACRO_PROMPT_CHAT_ID = int(os.environ.get("MACRO_PROMPT_CHAT_ID", "-1003945099460"))
+MACRO_PROMPT_THREAD_ID = int(os.environ.get("MACRO_PROMPT_THREAD_ID", "169"))
+MACRO_PROMPT_SCRIPT = os.environ.get(
+    "MACRO_PROMPT_SCRIPT", "/data/macros/daily_prompt.py"
+)
+FINANCE_DIGEST_HOUR = int(os.environ.get("FINANCE_DIGEST_HOUR", "9"))
+FINANCE_DIGEST_CHAT_ID = int(
+    os.environ.get("FINANCE_DIGEST_CHAT_ID", "-1003945099460")
+)
+FINANCE_DIGEST_THREAD_ID = int(os.environ.get("FINANCE_DIGEST_THREAD_ID", "357"))
+FINANCE_DIGEST_SCRIPT = os.environ.get(
+    "FINANCE_DIGEST_SCRIPT", "/data/finance/daily_digest.py"
+)
+
+
+def _format_macro_prompt(report: str) -> str:
+    """Turn daily_prompt.py's diagnostic report into one short user prompt."""
+    meals: list[str] = []
+    already = re.search(
+        r"ALREADY IN NOTION:\s*(\d+) item\(s\) \| "
+        r"([\d.]+) kcal, ([\d.]+)P ([\d.]+)C ([\d.]+)F",
+        report,
+    )
+    for line in report.splitlines():
+        match = re.search(
+            r"\[(?: NEW  |ROLLOVER)\]\s+(\w+)\s+\|\s+(.+?)\s+\|\s+"
+            r"([\d.]+) kcal, ([\d.]+)P",
+            line,
+        )
+        if match:
+            meal, item, calories, protein = match.groups()
+            meals.append(f"{meal.lower()} — {item} ({calories} kcal / {protein}P)")
+
+    prefix = "Macro check-in."
+    if already and int(already.group(1)):
+        prefix = f"Already logged today: {already.group(2)} kcal / {already.group(3)}P."
+    if meals:
+        return f"{prefix} Work meals: {'; '.join(meals)}. Did you eat all, most, some, or none of each? Anything else today?"
+    return f"{prefix} Nothing pre-filled from work today. What did you eat?"
+
+
+async def _send_daily_macro_prompt(telegram_bot, history) -> None:
+    """Run the durable pre-fill and post it directly to the Macros topic."""
+    proc = await asyncio.create_subprocess_exec(
+        "/app/.venv/bin/python3",
+        MACRO_PROMPT_SCRIPT,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode:
+        raise RuntimeError(
+            f"macro prompt script failed ({proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-1000:]}"
+        )
+    message = _format_macro_prompt(stdout.decode(errors="replace"))
+    history.add_assistant(
+        MACRO_PROMPT_CHAT_ID, message, thread_id=MACRO_PROMPT_THREAD_ID
+    )
+    await send_markdown(
+        lambda body, pm: telegram_bot.send_message(
+            chat_id=MACRO_PROMPT_CHAT_ID,
+            message_thread_id=MACRO_PROMPT_THREAD_ID,
+            text=body,
+            parse_mode=pm,
+        ),
+        message,
+    )
+
+
+async def _send_daily_finance_digest(telegram_bot, history) -> None:
+    """Run the read-only Emma digest and post it to the Finance topic."""
+    proc = await asyncio.create_subprocess_exec(
+        "/app/.venv/bin/python3",
+        FINANCE_DIGEST_SCRIPT,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode:
+        raise RuntimeError(
+            f"finance digest script failed ({proc.returncode}): "
+            f"{stderr.decode(errors='replace')[-1000:]}"
+        )
+    message = stdout.decode(errors="replace").strip()
+    if not message:
+        raise RuntimeError("finance digest script returned no output")
+    history.add_assistant(
+        FINANCE_DIGEST_CHAT_ID, message, thread_id=FINANCE_DIGEST_THREAD_ID
+    )
+    await send_markdown(
+        lambda body, pm: telegram_bot.send_message(
+            chat_id=FINANCE_DIGEST_CHAT_ID,
+            message_thread_id=FINANCE_DIGEST_THREAD_ID,
+            text=body,
+            parse_mode=pm,
+        ),
+        message,
+    )
+
 
 def _describe_tool_input(tool_input: dict) -> str:
     """Pick a key field from a tool's input to show in the status line."""
@@ -797,6 +898,10 @@ async def _run_scheduler(
         try:
             now_dt = datetime.now(tz)
             now = now_dt.strftime("%a %Y-%m-%d %H:%M %Z")
+            if now_dt.hour == FINANCE_DIGEST_HOUR:
+                await _send_daily_finance_digest(telegram_bot, history)
+            if now_dt.hour == MACRO_PROMPT_HOUR:
+                await _send_daily_macro_prompt(telegram_bot, history)
             if now_dt.hour == triage_hour:
                 prompt = f"[scheduled check-in @ {now}] {TRIAGE_INSTRUCTION}"
             else:
