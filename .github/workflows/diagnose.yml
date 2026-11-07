@@ -1,0 +1,65 @@
+# Read-only diagnostics for the running bot. Manual trigger only; it never
+# deploys, restarts or changes anything.
+#
+# Exists because the bot can be silent while healthy: the HTTP health route
+# answers from the same process that polls Telegram, so "health is ok" does
+# not prove updates are being received or turns are completing.
+#
+# Log output is filtered on purpose. Message bodies and model replies are
+# logged at INFO and are private, so only levels, counts and failure lines
+# are printed here, never conversation content.
+
+name: Diagnose Iris
+
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: "How many filtered failure lines to show"
+        required: false
+        default: "150"
+
+jobs:
+  diagnose:
+    name: Status and filtered logs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install flyctl
+        run: |
+          curl -L https://fly.io/install.sh | sh
+          echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
+
+      - name: App and machine status
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          echo "::group::status"
+          flyctl status -a iris-familiar || true
+          echo "::endgroup::"
+          echo "::group::machines (more than one means two pollers fight over Telegram)"
+          flyctl machines list -a iris-familiar || true
+          echo "::endgroup::"
+
+      - name: Filtered logs
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          LINES: ${{ inputs.lines }}
+        run: |
+          flyctl logs --no-tail -a iris-familiar > logs.txt 2>&1 || true
+          echo "captured $(wc -l < logs.txt) log lines"
+
+          echo "::group::log level counts"
+          grep -oE '\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b' logs.txt \
+            | sort | uniq -c | sort -rn || true
+          echo "::endgroup::"
+
+          echo "::group::lifecycle and polling signals"
+          grep -iE 'telegram long-polling|polling started|http /health|webhook|scheduler running|Starting init|Machine started|Main child exited|shutting down' logs.txt \
+            | tail -40 || true
+          echo "::endgroup::"
+
+          echo "::group::failures (conversation content excluded)"
+          grep -inE 'ERROR|CRITICAL|WARNING|Traceback|Exception|Conflict|terminated|OOM|out of memory|exited|restart|Errno|refused|unauthorized|401|403|409|429' logs.txt \
+            | grep -viE '\[claude text\]|\[claude thinking\]|\[claude tool_result\]|\[codex event\]' \
+            | tail -"${LINES:-150}" || true
+          echo "::endgroup::"
