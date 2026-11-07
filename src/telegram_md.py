@@ -44,7 +44,11 @@ async def send_markdown(send: Send, text: str) -> None:
         except BadRequest as exc:
             log.warning("MarkdownV2 rejected (%s); retrying as plain text", exc)
         except Exception:
-            log.exception("markdown send failed; retrying as plain text")
+            # A transport error can happen after Telegram accepted the request.
+            # Retrying then creates two identical messages. Only BadRequest is
+            # a definite rejection and therefore safe to retry as plain text.
+            log.exception("markdown send failed with unknown delivery state; not retrying")
+            return
     try:
         await send(raw, None)
     except Exception:

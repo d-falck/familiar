@@ -223,11 +223,12 @@ async def _send_daily_macro_prompt(telegram_bot, history) -> None:
     )
 
 
-async def _send_daily_finance_digest(telegram_bot, history) -> None:
-    """Run the read-only Emma digest and post it to the Finance topic."""
+async def _send_daily_finance_digest(telegram_bot, history, report_date: str) -> None:
+    """Post the previous completed London day's Emma spend to Finance."""
     proc = await asyncio.create_subprocess_exec(
         "/app/.venv/bin/python3",
         FINANCE_DIGEST_SCRIPT,
+        report_date,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -868,7 +869,7 @@ def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
     timezone (e.g. 15:00:00 local). Drift-free: recomputed each iteration
     so processing time doesn't shift subsequent firings.
     """
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     now = datetime.now(tz)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -899,7 +900,10 @@ async def _run_scheduler(
             now_dt = datetime.now(tz)
             now = now_dt.strftime("%a %Y-%m-%d %H:%M %Z")
             if now_dt.hour == FINANCE_DIGEST_HOUR:
-                await _send_daily_finance_digest(telegram_bot, history)
+                report_date = (now_dt.date() - timedelta(days=1)).isoformat()
+                await _send_daily_finance_digest(
+                    telegram_bot, history, report_date
+                )
             if now_dt.hour == MACRO_PROMPT_HOUR:
                 await _send_daily_macro_prompt(telegram_bot, history)
             if now_dt.hour == triage_hour:
