@@ -39,6 +39,19 @@ log = logging.getLogger(__name__)
 # still reaping a genuinely stuck subprocess. Override via env if needed.
 IDLE_TIMEOUT_SECONDS = int(os.environ.get("AGENT_IDLE_TIMEOUT_SECONDS", "300"))
 
+# Starting the CLI and handing it the prompt must also be bounded, not just
+# reading the response. IDLE_TIMEOUT_SECONDS only wraps `stream.__anext__()`,
+# so every await before the first stream event used to be unbounded — and the
+# prompt is now written to the child's stdin, where a payload larger than the
+# 64KB pipe buffer blocks until the CLI drains it. The SDK's own write has no
+# timeout, so a child that never reads stdin wedges the turn forever.
+#
+# Forever is the worst possible failure here: the turn never completes, so it
+# never replies, never errors, and is never marked handled — the user sees
+# silence and the backlog only flushes when the process restarts. A bound
+# turns that into an ordinary failed turn, which the caller already reports.
+STARTUP_TIMEOUT_SECONDS = int(os.environ.get("AGENT_STARTUP_TIMEOUT_SECONDS", "120"))
+
 # Largest single NDJSON message the SDK will accept from the CLI. The SDK's
 # default is 1MB, which ONE tool_result can exceed — a Read on a ~700KB JPEG
 # comes back as ~1MB of base64 — and the SDK then raises
@@ -105,11 +118,19 @@ async def run(
         stderr=lambda line: log.error("claude stderr: %s", line),
     )
 
+    prompt = (
+        f"<iris_system_prompt>\n{system_prompt}\n</iris_system_prompt>\n\n"
+        f"{render_transcript(messages)}"
+    )
     async with ClaudeSDKClient(options=options) as client:
-        await client.query(
-            f"<iris_system_prompt>\n{system_prompt}\n</iris_system_prompt>\n\n"
-            f"{render_transcript(messages)}"
-        )
+        try:
+            async with asyncio.timeout(STARTUP_TIMEOUT_SECONDS):
+                await client.query(prompt)
+        except (TimeoutError, asyncio.TimeoutError):
+            raise RuntimeError(
+                f"claude did not accept the {len(prompt)}-char prompt within "
+                f"{STARTUP_TIMEOUT_SECONDS}s — the CLI is not draining stdin"
+            )
         stream = client.receive_response().__aiter__()
         while True:
             try:

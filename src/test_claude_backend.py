@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -52,6 +53,38 @@ class ClaudePromptTransportTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(large_prompt, client.options["system_prompt"])
         self.assertIn(large_prompt, client.query_text)
         self.assertIn("hello", client.query_text)
+
+
+class _HangingClient(_FakeClient):
+    """Stands in for a CLI that never drains stdin: the write never returns."""
+
+    async def query(self, text):
+        await asyncio.sleep(3600)
+
+
+class StalledPromptHandoffTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_prompt_the_cli_never_accepts_fails_instead_of_hanging(self):
+        # The regression this guards: the prompt handoff was unbounded, and
+        # the idle watchdog only covers reading the response, so a child that
+        # never read stdin left the turn waiting forever. A turn that never
+        # finishes never replies and is never marked handled, so the user gets
+        # silence and the backlog only flushes on restart. It must raise.
+        with (
+            patch.object(claude_backend, "ClaudeSDKClient", _HangingClient),
+            patch.object(claude_backend, "ClaudeAgentOptions", lambda **kwargs: kwargs),
+            patch.object(claude_backend, "STARTUP_TIMEOUT_SECONDS", 1),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                await asyncio.wait_for(
+                    claude_backend.run(
+                        [{"role": "user", "content": "hello"}],
+                        system_prompt="x" * 100_000,
+                        model="test-model",
+                        mcp_servers={},
+                    ),
+                    timeout=20,
+                )
+        self.assertIn("not draining stdin", str(ctx.exception))
 
 
 if __name__ == "__main__":
