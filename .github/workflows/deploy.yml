@@ -16,6 +16,9 @@ on:
     # Docs and the separate finance app don't affect the running bot.
     paths-ignore:
       - "README.md"
+      # CI config does not change the running bot, and a redeploy restarts
+      # her, which discards live state worth inspecting during an incident.
+      - ".github/**"
       - "finance_connector/**"
       - "fly.finance.toml*"
       - "Dockerfile.finance"
