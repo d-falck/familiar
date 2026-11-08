@@ -58,6 +58,26 @@ jobs:
             | tail -40 || true
           echo "::endgroup::"
 
+          # Allowlist, never a denylist: only log messages whose format
+          # strings interpolate no user or model text are printed. Her INFO
+          # lines otherwise carry message bodies, replies and usernames, and
+          # CI output is the wrong place for any of it. Anything not named
+          # here stays unprinted even if it would have been useful.
+          SAFE='telegram long-polling started|http /health listening|composio webhook listening|scheduler running|voice-init shared-context|agent backend=|applying persisted model override|model switched|duplicate update_id=|interrupting in-flight turn|turn superseded|trimmed transcript|fast-path turn|respond failed|scheduled check-in failed|failed to set reaction|failed to persist|markdown send failed|MarkdownV2 rejected|plain-text send failed|markdownify failed|sanitized provider stream error|model usage limit returned as reply text|photo download failed|voice download failed|document download failed|voice transcription failed|claude stderr|did not accept the|produced no output for|Machine started|Starting init|Main child exited|OOM|out of memory'
+
+          echo "::group::turn-loop activity (allowlisted messages only)"
+          grep -inE "$SAFE" logs.txt | cut -c1-200 | tail -"${LINES:-150}" || true
+          echo "::endgroup::"
+
+          echo "::group::most frequent allowlisted messages"
+          grep -ioE "$SAFE" logs.txt | sort | uniq -c | sort -rn | head -25 || true
+          echo "::endgroup::"
+
+          echo "::group::log window span"
+          head -1 logs.txt | cut -c1-30 || true
+          tail -1 logs.txt | cut -c1-30 || true
+          echo "::endgroup::"
+
           echo "::group::failures (conversation content excluded)"
           grep -inE 'ERROR|CRITICAL|WARNING|Traceback|Exception|Conflict|terminated|OOM|out of memory|exited|restart|Errno|refused|unauthorized|401|403|409|429' logs.txt \
             | grep -viE '\[claude text\]|\[claude thinking\]|\[claude tool_result\]|\[codex event\]' \
