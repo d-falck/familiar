@@ -21,13 +21,16 @@ log = logging.getLogger("telegram_md")
 Send = Callable[[str, object], Awaitable[object]]
 
 
-async def send_markdown(send: Send, text: str) -> None:
+async def send_markdown(send: Send, text: str) -> object | None:
     """Deliver ``text`` to Telegram as MarkdownV2, falling back to plain text
     if the converted markup is rejected. MarkdownV2 is finicky — one stray
     entity makes Telegram reject the whole message — so a bad conversion must
     never mean a missing or raw-looking message. The raw text is truncated
     *before* markdownify so we never slice through an escape and corrupt the
     markup.
+
+    Returns whatever ``send`` returned (the Telegram ``Message``) so callers
+    can record its id, or None when nothing was delivered.
     """
     raw = text[:3900]
     md = None
@@ -39,8 +42,7 @@ async def send_markdown(send: Send, text: str) -> None:
         log.exception("markdownify failed; sending plain text")
     if md:
         try:
-            await send(md, ParseMode.MARKDOWN_V2)
-            return
+            return await send(md, ParseMode.MARKDOWN_V2)
         except BadRequest as exc:
             log.warning("MarkdownV2 rejected (%s); retrying as plain text", exc)
         except Exception:
@@ -48,8 +50,9 @@ async def send_markdown(send: Send, text: str) -> None:
             # Retrying then creates two identical messages. Only BadRequest is
             # a definite rejection and therefore safe to retry as plain text.
             log.exception("markdown send failed with unknown delivery state; not retrying")
-            return
+            return None
     try:
-        await send(raw, None)
+        return await send(raw, None)
     except Exception:
         log.exception("plain-text send failed")
+        return None

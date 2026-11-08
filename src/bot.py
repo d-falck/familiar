@@ -17,12 +17,21 @@ from aiohttp import web
 from composio import Composio
 from dotenv import load_dotenv
 from telegram import MessageEntity, ReactionTypeEmoji, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 import context_window
+import control_centre
 import fast_path
 import model_switch
 from agent import respond
+from feedback import Feedback, parse_callback, rated_keyboard, send_rated
 from history import History
 from refusal import (
     is_backend_error,
@@ -152,19 +161,19 @@ TRIAGE_INSTRUCTION = (
     f"{SILENCE_INSTRUCTION}"
 )
 
-MACRO_PROMPT_HOUR = int(os.environ.get("MACRO_PROMPT_HOUR", "20"))
-MACRO_PROMPT_CHAT_ID = int(os.environ.get("MACRO_PROMPT_CHAT_ID", "-1003945099460"))
-MACRO_PROMPT_THREAD_ID = int(os.environ.get("MACRO_PROMPT_THREAD_ID", "169"))
-MACRO_PROMPT_SCRIPT = os.environ.get(
-    "MACRO_PROMPT_SCRIPT", "/data/macros/daily_prompt.py"
-)
-FINANCE_DIGEST_HOUR = int(os.environ.get("FINANCE_DIGEST_HOUR", "9"))
-FINANCE_DIGEST_CHAT_ID = int(
-    os.environ.get("FINANCE_DIGEST_CHAT_ID", "-1003945099460")
-)
-FINANCE_DIGEST_THREAD_ID = int(os.environ.get("FINANCE_DIGEST_THREAD_ID", "357"))
-FINANCE_DIGEST_SCRIPT = os.environ.get(
-    "FINANCE_DIGEST_SCRIPT", "/data/finance/daily_digest.py"
+# Hours and destinations live in jobs.py so the Notion control-centre page
+# renders exactly what the scheduler runs.
+from jobs import (  # noqa: E402
+    CONTROL_CENTRE_HOUR,
+    FINANCE_DIGEST_CHAT_ID,
+    FINANCE_DIGEST_HOUR,
+    FINANCE_DIGEST_SCRIPT,
+    FINANCE_DIGEST_THREAD_ID,
+    MACRO_PROMPT_CHAT_ID,
+    MACRO_PROMPT_HOUR,
+    MACRO_PROMPT_SCRIPT,
+    MACRO_PROMPT_THREAD_ID,
+    TRIAGE_HOUR,
 )
 
 
@@ -223,7 +232,9 @@ async def _send_daily_macro_prompt(telegram_bot, history) -> None:
     )
 
 
-async def _send_daily_finance_digest(telegram_bot, history, report_date: str) -> None:
+async def _send_daily_finance_digest(
+    telegram_bot, history, report_date: str, feedback: Feedback | None = None
+) -> None:
     """Post the previous completed London day's Emma spend to Finance."""
     proc = await asyncio.create_subprocess_exec(
         "/app/.venv/bin/python3",
@@ -244,15 +255,32 @@ async def _send_daily_finance_digest(telegram_bot, history, report_date: str) ->
     history.add_assistant(
         FINANCE_DIGEST_CHAT_ID, message, thread_id=FINANCE_DIGEST_THREAD_ID
     )
-    await send_markdown(
-        lambda body, pm: telegram_bot.send_message(
-            chat_id=FINANCE_DIGEST_CHAT_ID,
-            message_thread_id=FINANCE_DIGEST_THREAD_ID,
-            text=body,
-            parse_mode=pm,
-        ),
-        message,
+    await send_rated(
+        telegram_bot,
+        feedback,
+        chat_id=FINANCE_DIGEST_CHAT_ID,
+        thread_id=FINANCE_DIGEST_THREAD_ID,
+        kind="spend digest",
+        text=message,
     )
+
+
+async def _sync_control_centre(
+    telegram_bot, history, feedback: Feedback | None, alert_chat_id: int | None
+) -> None:
+    """Re-render the Notion control-centre page; if a connection or trigger
+    Iris relies on has *newly* broken since the last sync, say so once."""
+    result = await asyncio.to_thread(control_centre.sync, None, feedback)
+    log.info("control centre synced: %s", result.get("url"))
+    new = result.get("new_attention") or []
+    if new and alert_chat_id:
+        text = "Heads-up, something I rely on just broke:\n" + "\n".join(
+            f"- {msg}" for msg in new
+        ) + f"\n\nDetails: {result.get('url')}"
+        history.add_assistant(alert_chat_id, text)
+        await send_rated(
+            telegram_bot, feedback, chat_id=alert_chat_id, kind="health alert", text=text
+        )
 
 
 def _describe_tool_input(tool_input: dict) -> str:
@@ -417,6 +445,41 @@ def _load_session_context(
         if base:
             return base + [{"role": "user", "content": _DM_CONTEXT_SEP}] + own
     return own
+
+
+async def on_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A 👍/👎 tap on a proactive message. Stores the rating, swaps the
+    buttons for a confirmation, and drops a one-line note into that
+    session's transcript so the next turn sees it — a 'noise' tap is
+    implicit feedback the self-improvement loop should act on."""
+    query = update.callback_query
+    parsed = parse_callback(query.data or "")
+    if parsed is None:
+        await query.answer()
+        return
+    row_id, rating = parsed
+    feedback: Feedback = context.application.bot_data["feedback"]
+    row = feedback.rate(row_id, rating)
+    msg_chat = query.message.chat.id if query.message else None
+    if row is None or (msg_chat is not None and row["chat_id"] != msg_chat):
+        await query.answer("Couldn't find that message.")
+        return
+    await query.answer("Logged — thanks." if rating == "useful" else "Logged — I'll send less like that.")
+    try:
+        await query.edit_message_reply_markup(reply_markup=rated_keyboard(rating))
+    except Exception:
+        log.exception("could not swap feedback buttons")
+    history: History = context.application.bot_data["history"]
+    note = (
+        f"[one-tap feedback] Damon rated your proactive {row['kind']} message "
+        f"{rating.upper()}: \"{row['excerpt']}\""
+    )
+    if rating == "noise":
+        note += (
+            " — treat as implicit 'that was noise' feedback: tighten whatever "
+            "made you send it (memory/prompt) next time you act."
+        )
+    history.add_user(row["chat_id"], "Damon", note, thread_id=row["thread_id"])
 
 
 async def on_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -887,26 +950,41 @@ async def _run_scheduler(
     history,
     respond_cfg: dict,
     triage_hour: int = 8,
+    feedback: Feedback | None = None,
 ) -> None:
     """In-process hourly loop. Exactly one tick per day (the one landing on
     ``triage_hour``) carries the minimal daily-triage nudge; every other tick
     is travel/deadline-only so the loop stays near-silent the rest of the day.
     """
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     while True:
         await asyncio.sleep(_seconds_to_next_boundary(interval_seconds, tz))
         try:
             now_dt = datetime.now(tz)
             now = now_dt.strftime("%a %Y-%m-%d %H:%M %Z")
+            # Deterministic jobs each get their own guard: one failing must
+            # not cost the others, nor the model tick below.
+            if now_dt.hour == CONTROL_CENTRE_HOUR:
+                try:
+                    await _sync_control_centre(telegram_bot, history, feedback, chat_id)
+                except Exception:
+                    log.exception("control-centre sync failed")
             if now_dt.hour == FINANCE_DIGEST_HOUR:
                 report_date = (now_dt.date() - timedelta(days=1)).isoformat()
-                await _send_daily_finance_digest(
-                    telegram_bot, history, report_date
-                )
+                try:
+                    await _send_daily_finance_digest(
+                        telegram_bot, history, report_date, feedback
+                    )
+                except Exception:
+                    log.exception("finance digest failed")
             if now_dt.hour == MACRO_PROMPT_HOUR:
-                await _send_daily_macro_prompt(telegram_bot, history)
-            if now_dt.hour == triage_hour:
+                try:
+                    await _send_daily_macro_prompt(telegram_bot, history)
+                except Exception:
+                    log.exception("macro prompt failed")
+            is_triage = now_dt.hour == triage_hour
+            if is_triage:
                 prompt = f"[scheduled check-in @ {now}] {TRIAGE_INSTRUCTION}"
             else:
                 prompt = (
@@ -916,6 +994,9 @@ async def _run_scheduler(
                     f"deadline with real cost. Otherwise stay silent.\n\n"
                     f"{SILENCE_INSTRUCTION}"
                 )
+            ratings = feedback.recent_summary() if feedback is not None else ""
+            if ratings:
+                prompt = f"{prompt}\n\n{ratings}"
             messages = context_window.trim(history.load_as_messages(chat_id))
             messages.append({"role": "user", "content": prompt})
             reply = await respond(messages, **respond_cfg)
@@ -931,11 +1012,12 @@ async def _run_scheduler(
                 )
             elif not is_silent(reply):
                 history.add_assistant(chat_id, reply)
-                await send_markdown(
-                    lambda body, pm: telegram_bot.send_message(
-                        chat_id=chat_id, text=body, parse_mode=pm
-                    ),
-                    reply,
+                await send_rated(
+                    telegram_bot,
+                    feedback,
+                    chat_id=chat_id,
+                    kind="morning triage" if is_triage else "hourly check",
+                    text=reply,
                 )
         except Exception:
             log.exception("scheduled check-in failed")
@@ -1028,6 +1110,7 @@ async def _run() -> None:
         "workspace_chat_ids": sorted(workspace_chat_ids),
     }
     history = History(history_path)
+    feedback = Feedback(history_path)
 
     # Process messages concurrently so you can fire several requests at once
     # and they run in parallel (replies interleave). Bounded because each turn
@@ -1043,6 +1126,7 @@ async def _run() -> None:
     app.bot_data["model_defaults"] = (default_backend, default_model)
     app.bot_data["model_override_path"] = model_override_path
     app.bot_data["history"] = history
+    app.bot_data["feedback"] = feedback
     app.bot_data["debug_chat_id"] = os.environ.get("DEBUG_CHAT_ID")
     app.bot_data["attachments_dir"] = Path(
         os.environ.get("ATTACHMENTS_DIR", "./attachments")
@@ -1087,6 +1171,7 @@ async def _run() -> None:
 
     app.add_handler(CommandHandler("id", on_id))
     app.add_handler(CommandHandler(["model", "models"], on_model))
+    app.add_handler(CallbackQueryHandler(on_feedback, pattern=r"^fb:"))
     app.add_handler(
         MessageHandler(
             (filters.ChatType.GROUPS | filters.ChatType.PRIVATE)
@@ -1131,6 +1216,7 @@ async def _run() -> None:
         history=history,
         respond_fn=respond,
         respond_cfg=respond_cfg,
+        feedback=feedback,
     )
     runner = web.AppRunner(aiohttp_app)
     await runner.setup()
@@ -1158,15 +1244,31 @@ async def _run() -> None:
                 telegram_bot=app.bot,
                 history=history,
                 respond_cfg=respond_cfg,
-                triage_hour=int(os.environ.get("TRIAGE_HOUR", "8")),
+                triage_hour=TRIAGE_HOUR,
+                feedback=feedback,
             )
         )
         log.info(
             "scheduler running every %ss (tz=%s, triage_hour=%s)",
             schedule_interval_raw,
             tz,
-            os.environ.get("TRIAGE_HOUR", "8"),
+            TRIAGE_HOUR,
         )
+
+    # Refresh the Notion control-centre page on every boot, so a deploy that
+    # changes a schedule shows up there without waiting for the daily sync.
+    async def _boot_sync() -> None:
+        try:
+            await _sync_control_centre(
+                app.bot,
+                history,
+                feedback,
+                int(trigger_chat_raw) if trigger_chat_raw else None,
+            )
+        except Exception:
+            log.exception("boot control-centre sync failed")
+
+    asyncio.create_task(_boot_sync())
 
     try:
         await asyncio.Event().wait()

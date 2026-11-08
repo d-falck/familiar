@@ -28,6 +28,7 @@ import context_window
 from prompt import build_voice_prompt, load_memory, render_recent_context
 from refusal import undeliverable_reason
 from silence import SILENCE_INSTRUCTION, is_silent
+from feedback import send_rated
 from telegram_md import send_markdown
 
 log = logging.getLogger("webhook")
@@ -118,6 +119,7 @@ def build_app(
     history=None,
     respond_fn=None,
     respond_cfg: dict | None = None,
+    feedback=None,
 ) -> web.Application:
     """Build an aiohttp app. /health is always exposed; /composio/webhook
     is only added when all the trigger-handling dependencies are supplied.
@@ -175,11 +177,12 @@ def build_app(
             # but as a single terse assistant row (not the original event).
             history.add_assistant(target_chat_id, reply)
             try:
-                await send_markdown(
-                    lambda body, pm: telegram_bot.send_message(
-                        chat_id=target_chat_id, text=body, parse_mode=pm
-                    ),
-                    reply,
+                await send_rated(
+                    telegram_bot,
+                    feedback,
+                    chat_id=target_chat_id,
+                    kind=f"trigger: {payload.get('triggerName') or payload.get('type') or 'event'}",
+                    text=reply,
                 )
             except Exception:
                 log.exception("failed to post trigger reply to telegram")
