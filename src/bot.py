@@ -167,6 +167,7 @@ from jobs import (  # noqa: E402
     CONTROL_CENTRE_HOUR,
     FINANCE_DIGEST_CHAT_ID,
     FINANCE_DIGEST_HOUR,
+    FINANCE_DIGEST_RETRY_UNTIL_HOUR,
     FINANCE_DIGEST_SCRIPT,
     FINANCE_DIGEST_THREAD_ID,
     MACRO_PROMPT_CHAT_ID,
@@ -232,10 +233,41 @@ async def _send_daily_macro_prompt(telegram_bot, history) -> None:
     )
 
 
+def _digest_header(report_date: str) -> str:
+    """First token of the digest script's output for ``report_date``, e.g.
+    ``"Mon 9 Nov:"`` — the dedup key for already-sent digests."""
+    from datetime import date
+
+    d = date.fromisoformat(report_date)
+    return f"{d:%a} {d.day} {d:%b}:"
+
+
 async def _send_daily_finance_digest(
-    telegram_bot, history, report_date: str, feedback: Feedback | None = None
-) -> None:
-    """Post the previous completed London day's Emma spend to Finance."""
+    telegram_bot,
+    history,
+    report_date: str,
+    feedback: Feedback | None = None,
+    *,
+    final_attempt: bool = True,
+) -> bool:
+    """Post the previous completed London day's Emma spend to Finance.
+
+    Idempotent: returns True without sending if that day's digest is already
+    in history (so hourly retries and restarts can't double-post). Returns
+    False — send nothing — when the feed hasn't synced the day yet and later
+    attempts remain; on the final attempt a one-line stall note goes out
+    instead so a missing digest is never silent.
+    """
+    import time
+
+    header = _digest_header(report_date)
+    if history.has_assistant_prefix(
+        FINANCE_DIGEST_CHAT_ID,
+        header,
+        thread_id=FINANCE_DIGEST_THREAD_ID,
+        since=time.time() - 3 * 86400,
+    ):
+        return True
     proc = await asyncio.create_subprocess_exec(
         "/app/.venv/bin/python3",
         FINANCE_DIGEST_SCRIPT,
@@ -252,6 +284,15 @@ async def _send_daily_finance_digest(
     message = stdout.decode(errors="replace").strip()
     if not message:
         raise RuntimeError("finance digest script returned no output")
+    if message.startswith("!!"):
+        # e.g. "!! no data for 2026-11-09; feed syncs to 2026-11-08"
+        if not final_attempt:
+            log.info("finance digest deferred: %s", message)
+            return False
+        message = (
+            f"No spend digest for {header.rstrip(':')} — the Emma feed hasn't "
+            f"synced that day yet ({message.lstrip('! ')})."
+        )
     history.add_assistant(
         FINANCE_DIGEST_CHAT_ID, message, thread_id=FINANCE_DIGEST_THREAD_ID
     )
@@ -263,6 +304,7 @@ async def _send_daily_finance_digest(
         kind="spend digest",
         text=message,
     )
+    return True
 
 
 async def _sync_control_centre(
@@ -970,11 +1012,17 @@ async def _run_scheduler(
                     await _sync_control_centre(telegram_bot, history, feedback, chat_id)
                 except Exception:
                     log.exception("control-centre sync failed")
-            if now_dt.hour == FINANCE_DIGEST_HOUR:
+            if FINANCE_DIGEST_HOUR <= now_dt.hour <= FINANCE_DIGEST_RETRY_UNTIL_HOUR:
+                # Retried every hour in the window; idempotent via history, so
+                # a deferred/failed 07:00 run is picked up at 08:00 and so on.
                 report_date = (now_dt.date() - timedelta(days=1)).isoformat()
                 try:
                     await _send_daily_finance_digest(
-                        telegram_bot, history, report_date, feedback
+                        telegram_bot,
+                        history,
+                        report_date,
+                        feedback,
+                        final_attempt=now_dt.hour >= FINANCE_DIGEST_RETRY_UNTIL_HOUR,
                     )
                 except Exception:
                     log.exception("finance digest failed")

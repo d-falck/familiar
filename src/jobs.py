@@ -23,7 +23,13 @@ MACRO_PROMPT_SCRIPT = os.environ.get(
     "MACRO_PROMPT_SCRIPT", "/data/macros/daily_prompt.py"
 )
 
-FINANCE_DIGEST_HOUR = int(os.environ.get("FINANCE_DIGEST_HOUR", "9"))
+FINANCE_DIGEST_HOUR = int(os.environ.get("FINANCE_DIGEST_HOUR", "7"))
+# The Emma feed usually has yesterday by early morning, but not always: if the
+# day hasn't synced (or the run errors) the digest retries each hour until this
+# hour, then posts a one-line "feed hasn't synced" note instead of vanishing.
+FINANCE_DIGEST_RETRY_UNTIL_HOUR = int(
+    os.environ.get("FINANCE_DIGEST_RETRY_UNTIL_HOUR", "11")
+)
 FINANCE_DIGEST_CHAT_ID = int(
     os.environ.get("FINANCE_DIGEST_CHAT_ID", "-1003945099460")
 )
@@ -87,7 +93,11 @@ def describe() -> list[dict]:
             "when": f"{FINANCE_DIGEST_HOUR:02d}:00",
             "name": "Daily spend digest",
             "where": _where(FINANCE_DIGEST_THREAD_ID),
-            "what": "Yesterday's spend vs typical, what was avoidable, month-to-date.",
+            "what": (
+                "Yesterday's spend vs typical, what was avoidable, month-to-date. "
+                f"Retries hourly until {FINANCE_DIGEST_RETRY_UNTIL_HOUR:02d}:00 "
+                "if the bank feed hasn't synced yet."
+            ),
         },
         {
             "hour": MACRO_PROMPT_HOUR,

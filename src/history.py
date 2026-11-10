@@ -54,6 +54,20 @@ class History:
             (chat_id, thread_id, text),
         )
 
+    def has_assistant_prefix(
+        self, chat_id: int, prefix: str, *, thread_id: int = 0, since: float = 0.0
+    ) -> bool:
+        """True if an assistant row in this session starting with ``prefix``
+        was written at/after ``since`` (unix seconds). Used to make scheduled
+        sends idempotent across retries and restarts."""
+        row = self._conn.execute(
+            "SELECT 1 FROM messages WHERE chat_id = ? AND thread_id = ? "
+            "AND role = 'assistant' AND created_at >= ? "
+            "AND substr(content, 1, ?) = ? LIMIT 1",
+            (chat_id, thread_id, since, len(prefix), prefix),
+        ).fetchone()
+        return row is not None
+
     def load_as_messages(self, chat_id: int, thread_id: int = 0) -> list[dict]:
         """Return one session as Anthropic-shaped turns, coalescing consecutive user rows."""
         rows = self._conn.execute(
