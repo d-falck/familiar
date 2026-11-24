@@ -167,6 +167,7 @@ from jobs import (  # noqa: E402
     CONTROL_CENTRE_HOUR,
     FINANCE_DIGEST_CHAT_ID,
     FINANCE_DIGEST_HOUR,
+    FINANCE_EVENING_DIGEST_HOUR,
     FINANCE_DIGEST_RETRY_UNTIL_HOUR,
     FINANCE_DIGEST_SCRIPT,
     FINANCE_DIGEST_THREAD_ID,
@@ -233,13 +234,15 @@ async def _send_daily_macro_prompt(telegram_bot, history) -> None:
     )
 
 
-def _digest_header(report_date: str) -> str:
+def _digest_header(report_date: str, *, so_far: bool = False) -> str:
     """First token of the digest script's output for ``report_date``, e.g.
-    ``"Mon 9 Nov:"`` — the dedup key for already-sent digests."""
+    ``"Mon 9 Nov:"`` — the dedup key for already-sent digests. The evening
+    "so far" run uses ``"Mon 9 Nov so far:"`` so it can never be mistaken for
+    (and suppress) the next morning's final digest of the same day."""
     from datetime import date
 
     d = date.fromisoformat(report_date)
-    return f"{d:%a} {d.day} {d:%b}:"
+    return f"{d:%a} {d.day} {d:%b}{' so far' if so_far else ''}:"
 
 
 async def _send_daily_finance_digest(
@@ -249,8 +252,13 @@ async def _send_daily_finance_digest(
     feedback: Feedback | None = None,
     *,
     final_attempt: bool = True,
+    so_far: bool = False,
 ) -> bool:
     """Post the previous completed London day's Emma spend to Finance.
+
+    ``so_far=True`` is the evening run: it reports TODAY's partial day under a
+    distinct "so far" header, and if the feed has nothing for today yet it
+    posts a one-line note rather than the morning's stall message.
 
     Idempotent: returns True without sending if that day's digest is already
     in history (so hourly retries and restarts can't double-post). Returns
@@ -260,7 +268,7 @@ async def _send_daily_finance_digest(
     """
     import time
 
-    header = _digest_header(report_date)
+    header = _digest_header(report_date, so_far=so_far)
     if history.has_assistant_prefix(
         FINANCE_DIGEST_CHAT_ID,
         header,
@@ -272,6 +280,7 @@ async def _send_daily_finance_digest(
         "/app/.venv/bin/python3",
         FINANCE_DIGEST_SCRIPT,
         report_date,
+        *(["--so-far"] if so_far else []),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -289,10 +298,16 @@ async def _send_daily_finance_digest(
         if not final_attempt:
             log.info("finance digest deferred: %s", message)
             return False
-        message = (
-            f"No spend digest for {header.rstrip(':')} — the Emma feed hasn't "
-            f"synced that day yet ({message.lstrip('! ')})."
-        )
+        if so_far:
+            message = (
+                f"{header.rstrip(':')}: nothing has synced from the bank feed "
+                "yet. The 07:00 digest will have the day."
+            )
+        else:
+            message = (
+                f"No spend digest for {header.rstrip(':')} — the Emma feed hasn't "
+                f"synced that day yet ({message.lstrip('! ')})."
+            )
     history.add_assistant(
         FINANCE_DIGEST_CHAT_ID, message, thread_id=FINANCE_DIGEST_THREAD_ID
     )
@@ -1026,6 +1041,17 @@ async def _run_scheduler(
                     )
                 except Exception:
                     log.exception("finance digest failed")
+            if now_dt.hour == FINANCE_EVENING_DIGEST_HOUR:
+                try:
+                    await _send_daily_finance_digest(
+                        telegram_bot,
+                        history,
+                        now_dt.date().isoformat(),
+                        feedback,
+                        so_far=True,
+                    )
+                except Exception:
+                    log.exception("evening finance digest failed")
             if now_dt.hour == MACRO_PROMPT_HOUR:
                 try:
                     await _send_daily_macro_prompt(telegram_bot, history)

@@ -31,14 +31,19 @@ class FinanceDigestTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run(self, out: str, *, final: bool):
+    def _run(self, out: str, *, final: bool, so_far: bool = False):
         sent = AsyncMock()
         with patch.object(
             bot.asyncio, "create_subprocess_exec", AsyncMock(return_value=_Proc(out))
         ) as spawn, patch.object(bot, "send_rated", sent):
             ok = asyncio.run(
                 bot._send_daily_finance_digest(
-                    None, self.history, "2026-11-09", None, final_attempt=final
+                    None,
+                    self.history,
+                    "2026-11-09",
+                    None,
+                    final_attempt=final,
+                    so_far=so_far,
                 )
             )
         return ok, spawn, sent
@@ -70,6 +75,44 @@ class FinanceDigestTest(unittest.TestCase):
         text = sent.await_args.kwargs["text"]
         self.assertIn("hasn't synced", text)
         self.assertFalse(text.startswith("!!"))
+
+    def test_evening_header_is_distinct_from_morning(self):
+        self.assertEqual(
+            bot._digest_header("2026-11-09", so_far=True), "Mon 9 Nov so far:"
+        )
+
+    def test_evening_digest_does_not_suppress_morning_digest(self):
+        ok, spawn, sent = self._run(
+            "Mon 9 Nov so far: £37.59  (typical full day: £201)",
+            final=True,
+            so_far=True,
+        )
+        self.assertTrue(ok)
+        self.assertIn("--so-far", spawn.await_args.args)
+        sent.assert_awaited_once()
+        # Next morning's final digest for the same date must still go out.
+        ok, spawn, sent = self._run("Mon 9 Nov: £155.87  (typical)", final=False)
+        self.assertTrue(ok)
+        self.assertNotIn("--so-far", spawn.await_args.args)
+        sent.assert_awaited_once()
+
+    def test_evening_digest_sends_once(self):
+        self._run("Mon 9 Nov so far: £37.59", final=True, so_far=True)
+        ok, spawn, sent = self._run("Mon 9 Nov so far: £37.59", final=True, so_far=True)
+        self.assertTrue(ok)
+        spawn.assert_not_awaited()
+        sent.assert_not_awaited()
+
+    def test_evening_digest_with_nothing_synced_posts_one_line(self):
+        ok, _, sent = self._run(
+            "!! no data for 2026-11-09; feed syncs to 2026-11-08",
+            final=True,
+            so_far=True,
+        )
+        self.assertTrue(ok)
+        text = sent.await_args.kwargs["text"]
+        self.assertTrue(text.startswith("Mon 9 Nov so far:"))
+        self.assertNotIn("!!", text)
 
     def test_unrelated_reply_in_topic_does_not_block(self):
         self.history.add_assistant(
