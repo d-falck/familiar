@@ -31,10 +31,11 @@ FINANCE_DIGEST_RETRY_UNTIL_HOUR = int(
     os.environ.get("FINANCE_DIGEST_RETRY_UNTIL_HOUR", "11")
 )
 # Second, end-of-day run (Damon, 2026-11-24: "summaries at the end of day too,
-# by midnight"). Covers TODAY so far, once, at this hour. The feed can lag a
+# by midnight", not 23:00). Runs at 00:00 and covers the day that just ended
+# (see _evening_digest_date), once, at this hour. The feed can lag a
 # few hours, so it is labelled "so far" and the 07:00 digest stays the final
 # figure. Set to -1 to switch it off.
-FINANCE_EVENING_DIGEST_HOUR = int(os.environ.get("FINANCE_EVENING_DIGEST_HOUR", "23"))
+FINANCE_EVENING_DIGEST_HOUR = int(os.environ.get("FINANCE_EVENING_DIGEST_HOUR", "0"))
 FINANCE_DIGEST_CHAT_ID = int(
     os.environ.get("FINANCE_DIGEST_CHAT_ID", "-1003945099460")
 )
@@ -112,7 +113,7 @@ def describe() -> list[dict]:
                     "name": "End-of-day spend digest",
                     "where": _where(FINANCE_DIGEST_THREAD_ID),
                     "what": (
-                        "Today's spend so far vs a typical day. Labelled "
+                        "The day's spend so far vs a typical day. Labelled "
                         '"so far" because the bank feed can lag; the 07:00 '
                         "digest carries the final figure."
                     ),

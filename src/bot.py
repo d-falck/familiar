@@ -245,6 +245,17 @@ def _digest_header(report_date: str, *, so_far: bool = False) -> str:
     return f"{d:%a} {d.day} {d:%b}{' so far' if so_far else ''}:"
 
 
+def _evening_digest_date(now_dt):
+    """The day the end-of-day digest covers. At 00:00 the clock has already
+    rolled over, so the day that just ended is *yesterday*; at any evening hour
+    it is today."""
+    from datetime import timedelta
+
+    if now_dt.hour < 12:
+        return now_dt.date() - timedelta(days=1)
+    return now_dt.date()
+
+
 async def _send_daily_finance_digest(
     telegram_bot,
     history,
@@ -1046,7 +1057,7 @@ async def _run_scheduler(
                     await _send_daily_finance_digest(
                         telegram_bot,
                         history,
-                        now_dt.date().isoformat(),
+                        _evening_digest_date(now_dt).isoformat(),
                         feedback,
                         so_far=True,
                     )

@@ -114,6 +114,21 @@ class FinanceDigestTest(unittest.TestCase):
         self.assertTrue(text.startswith("Mon 9 Nov so far:"))
         self.assertNotIn("!!", text)
 
+    def test_midnight_digest_covers_the_day_that_just_ended(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Europe/London")
+        # 00:00 Tue 24 Nov -> Monday's spend; 23:00 Mon -> still Monday.
+        self.assertEqual(
+            bot._evening_digest_date(datetime(2026, 11, 24, 0, 0, tzinfo=tz)).isoformat(),
+            "2026-11-23",
+        )
+        self.assertEqual(
+            bot._evening_digest_date(datetime(2026, 11, 23, 23, 0, tzinfo=tz)).isoformat(),
+            "2026-11-23",
+        )
+
     def test_unrelated_reply_in_topic_does_not_block(self):
         self.history.add_assistant(
             bot.FINANCE_DIGEST_CHAT_ID,
