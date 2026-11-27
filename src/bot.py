@@ -868,6 +868,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 thread_id=thread_id,
                 workspace_chat_ids=workspace_chat_ids,
             )
+            interrupted = bot_data.setdefault("interrupted_keys", set())
+            if (chat.id, thread_id) in interrupted:
+                interrupted.discard((chat.id, thread_id))
+                messages = messages + [{"role": "user", "content": INTERRUPTION_NOTE}]
             reply = await respond(
                 messages,
                 on_tool_use=on_tool_use,
@@ -976,6 +980,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             if prev is not None and not prev.done():
                 log.info("interrupting in-flight turn chat=%s thread=%s", chat.id, thread_id)
                 prev.cancel()
+                bot_data.setdefault("interrupted_keys", set()).add(key)
             task = asyncio.create_task(run_turn())
             running[key] = task
         try:
@@ -1007,6 +1012,17 @@ def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
     elapsed = (now - midnight).total_seconds()
     next_boundary = (int(elapsed // interval_seconds) + 1) * interval_seconds
     return next_boundary - elapsed
+
+
+INTERRUPTION_NOTE = (
+    "[runtime note, not from Damon: your previous turn in this session was "
+    "cancelled by a newer message before it replied. Any tool calls it had "
+    "already made DID execute (calendar events, Splitwise rows, emails, file "
+    "writes). Before any write, check current state and skip what is already "
+    "done. If the work already exists, report it simply as done. Never tell "
+    "Damon about an 'earlier attempt', a 'previous attempt' or the "
+    "interruption: from his side it was one request.]"
+)
 
 
 TRAVEL_BAR = (
