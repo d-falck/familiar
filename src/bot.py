@@ -1009,6 +1009,20 @@ def _seconds_to_next_boundary(interval_seconds: int, tz) -> float:
     return next_boundary - elapsed
 
 
+TRAVEL_BAR = (
+    "Travel-reminder bar (Damon rated short-trip reminders NOISE twice, "
+    "10 Nov Kimchee and 27 Nov Blue Door: 'these kinda updates generally "
+    "aren't useful'). Send a departure reminder ONLY if the trip is long or "
+    "needs planning: ~30+ min door-to-door, a train/flight/coach, or an "
+    "unfamiliar place, OR the event has a detail he would otherwise miss (a "
+    "ticket/QR code, cash-only, a hold that expires). A routine appointment "
+    "within central London that is ~25 min or less by transit is NOT worth a "
+    "message: it is on his calendar and he knows. Never send 'I have no "
+    "location fix, so here are two routes' hedges. Never recap calendar "
+    "details back to him. If it is borderline, stay silent."
+)
+
+
 async def _run_scheduler(
     *,
     interval_seconds: int,
@@ -1077,6 +1091,7 @@ async def _run_scheduler(
                     f"silence for a travel departure reminder that is due now "
                     f"(per the travel rules in memory), or a genuine same-day "
                     f"deadline with real cost. Otherwise stay silent.\n\n"
+                    f"{TRAVEL_BAR}\n\n"
                     f"{SILENCE_INSTRUCTION}"
                 )
             ratings = feedback.recent_summary() if feedback is not None else ""
